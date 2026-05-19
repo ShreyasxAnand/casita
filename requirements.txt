@@ -1,0 +1,7 @@
+fastapi>=0.109,<1.0
+uvicorn[standard]>=0.27,<1.0
+pydantic>=2.6,<3.0
+httpx>=0.26,<1.0
+shapely>=2.0
+pyproj>=3.6
+homeharvest>=0.8.18
