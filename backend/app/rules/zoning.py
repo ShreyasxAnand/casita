@@ -2,7 +2,30 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class ZoningData:
+    zoning: str
+    zoning_abbrev: str
+    zoning_full_name: str
+    facility_id: str | None
+    rezoning_file: str | None
+    pd_use: str | None
+    pd_density: str | None
+    developed_as_pd: str | None
+    approval_date: str | None
+    notes: str | None
+
+
+@dataclass(frozen=True)
+class GeneralPlanData:
+    gp_designation: str
+    gp_abbreviation: str
+    notes: str | None
+    last_update: str | None
 
 # Static zoning code → human label map. Lifted from the legacy
 # `_zoning_full_name` table in `main.py`; live here so it can be unit-tested
@@ -62,8 +85,8 @@ def property_type_from_style(style: str | None) -> str:
 
 
 def adu_eligibility(
-    zoning: dict[str, Any],
-    general_plan: dict[str, Any],
+    zoning: ZoningData | None,
+    general_plan: GeneralPlanData | None,
     property_type: str,
 ) -> tuple[bool, str]:
     """Decide whether an ADU is allowed on the parcel.
@@ -72,8 +95,9 @@ def adu_eligibility(
     in the root project; kept self-contained here so the MVP can be tested in
     isolation.
     """
-    code = str(zoning.get("zoning") or "").upper()
-    gp = str(general_plan.get("gp_designation") or "").upper()
+    code = str(zoning.zoning if zoning else "").upper()
+    gp = str(general_plan.gp_designation if general_plan else "").upper()
+    gp_label = general_plan.gp_designation if general_plan else "unknown"
     is_sf = property_type == "Single-Family"
     is_multi = property_type in ("Duplex", "Multi-Family")
     # R-1 + Unknown ⇒ treat as single-family for eligibility.
@@ -90,13 +114,11 @@ def adu_eligibility(
         if eff_sf:
             return (
                 True,
-                f"ADU allowed: General Plan '{general_plan.get('gp_designation')}' "
-                "with single-family residence.",
+                f"ADU allowed: General Plan '{gp_label}' with single-family residence.",
             )
         return (
             False,
-            f"General Plan '{general_plan.get('gp_designation')}' allows ADUs "
-            f"but property type is {property_type}.",
+            f"General Plan '{gp_label}' allows ADUs but property type is {property_type}.",
         )
 
     if code.startswith("PD") or "(PD)" in code:
@@ -114,5 +136,5 @@ def adu_eligibility(
     return (
         False,
         f"No automatic residential/PD/eligible General Plan path for zoning "
-        f"{zoning.get('zoning') or 'unknown'}.",
+        f"{zoning.zoning if zoning else 'unknown'}.",
     )

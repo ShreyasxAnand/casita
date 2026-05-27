@@ -8,12 +8,11 @@ from __future__ import annotations
 
 from typing import Any
 
-# Lot-tier caps for single-family detached ADUs.
+# Lot-tier caps (apply to both single-family and duplex/multifamily City Standards).
 _SMALL_LOT_FT2 = 9000
 _SMALL_LOT_CAP_SQFT = 1000
 _LARGE_LOT_CAP_SQFT = 1200
 _JADU_MAX_SQFT = 500.0
-_DUPLEX_CAP_SQFT = 800.0
 _ATTACHED_PRIMARY_FRACTION = 0.5
 
 
@@ -48,16 +47,43 @@ def adu_size_limits(
         }
 
     if is_multi:
-        tier = "Duplex / Multifamily — Attached" if adu_type == "attached" else "Duplex / Multifamily — Detached"
+        # City Standards for duplex/multifamily use the same lot-tier + 50%-of-primary
+        # formula as single-family (Bulletin #210 p.4). The 800 sf figure in the PDF is
+        # the State Standards detached cap, not the City Standards cap.
         flavor = "attached" if adu_type == "attached" else "detached"
+        if parcel_area_ft2 <= 0:
+            lot_cap = _LARGE_LOT_CAP_SQFT
+            tier_label = "Duplex/Multifamily — lot size unknown (assumed ≥ 9,000 sf)"
+        elif parcel_area_ft2 < _SMALL_LOT_FT2:
+            lot_cap = _SMALL_LOT_CAP_SQFT
+            tier_label = f"Duplex/Multifamily — lot {parcel_area_ft2:,.0f} sf (< 9,000 sf)"
+        else:
+            lot_cap = _LARGE_LOT_CAP_SQFT
+            tier_label = f"Duplex/Multifamily — lot {parcel_area_ft2:,.0f} sf (≥ 9,000 sf)"
+
+        if primary_sqft and primary_sqft > 0:
+            max_size = min(primary_sqft * _ATTACHED_PRIMARY_FRACTION, float(lot_cap))
+            primary_note = (
+                f"50% of {primary_sqft:,.0f} sf primary = "
+                f"{primary_sqft * _ATTACHED_PRIMARY_FRACTION:,.0f} sf; "
+                f"capped at {lot_cap:,} sf = {max_size:,.0f} sf max."
+            )
+        else:
+            max_size = float(lot_cap)
+            primary_note = "Primary living area unknown; full lot-tier cap used."
+
         return {
-            "tier": tier,
-            "max_this_type": _DUPLEX_CAP_SQFT,
-            "max_detached": _DUPLEX_CAP_SQFT,
-            "max_attached": _DUPLEX_CAP_SQFT,
+            "tier": f"{tier_label} — {flavor.capitalize()} ADU",
+            "max_this_type": max_size,
+            "max_detached": max_size,
+            "max_attached": max_size,
             "max_jadu": None,
             "lot_basis": parcel_area_ft2,
-            "notes": f"Duplex/multifamily {flavor} ADU: 800 sf max. JADUs not allowed.",
+            "notes": (
+                f"Duplex/multifamily {flavor} ADU (City Standards): up to 50% of main home "
+                f"living area, max {lot_cap:,} sf. {primary_note} JADUs not allowed on "
+                "duplex/multifamily properties."
+            ),
         }
 
     if parcel_area_ft2 <= 0:

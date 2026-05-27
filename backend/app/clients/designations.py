@@ -1,21 +1,23 @@
 """Flood / geohazard / historic / WUI / heritage-tree designation lookups.
 
-T1 correctness change: every lookup now returns one of three explicit
-statuses — `present`, `absent`, or `error` — instead of collapsing service
-outages into `None`. Callers can render an honest "lookup failed" item
-distinct from a confident "no designation found".
+Every lookup returns FetchResult[DesignationData] with three honest states:
+  OK     — service responded; present=True/False reflects the actual designation
+  ABSENT — service responded, no feature at this location (not designated)
+  FAILED — service error; we have no information
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 from fastapi import HTTPException
 from shapely.geometry import shape
 
+from app.result import FetchResult
 from app.services import arcgis
 
 logger = logging.getLogger(__name__)
@@ -36,10 +38,13 @@ SAN_JOSE_GEOHAZARD_QUERY_URL = (
 
 SFHA_ZONES = {"A", "AE", "AH", "AO", "A99"}
 
-# Small pad in degrees used when querying point layers (e.g. heritage trees)
-# against a parcel bounding box — covers point data that may sit just outside
-# the parcel polygon due to coordinate imprecision (~20 m).
 _HERITAGE_PAD_DEG = 0.00018
+
+
+@dataclass(frozen=True)
+class DesignationData:
+    present: bool
+    detail: str
 
 
 async def _attrs_point(
@@ -91,16 +96,20 @@ def _parse_flood_zone(attrs: dict[str, Any]) -> tuple[bool, str]:
     return in_sfha, zone
 
 
-async def fetch_flood(client: httpx.AsyncClient, lat: float, lon: float) -> dict[str, Any]:
+async def fetch_flood(
+    client: httpx.AsyncClient, lat: float, lon: float
+) -> FetchResult[DesignationData]:
+    _SRC_FEMA = "FEMA NFHL"
+    _SRC_SJ = "San Jose OPN Flood Hazard Area layer 439"
+
     try:
         attrs = await _attrs_point(client, FEMA_NFHL_QUERY_URL, lon, lat, stage="FEMA flood zone")
         if attrs:
             in_sfha, zone = _parse_flood_zone(attrs[0])
-            return {
-                "in_sfha": in_sfha, "zone": zone,
-                "detail": f"Zone: {zone} (FEMA NFHL).",
-                "source": "FEMA NFHL",
-            }
+            return FetchResult.ok(
+                DesignationData(present=in_sfha, detail=f"Zone: {zone} (FEMA NFHL)."),
+                _SRC_FEMA,
+            )
     except HTTPException as exc:
         logger.info("FEMA flood lookup failed, trying San Jose layer: %s", exc.detail)
 
@@ -109,57 +118,41 @@ async def fetch_flood(client: httpx.AsyncClient, lat: float, lon: float) -> dict
             client, SAN_JOSE_FLOOD_QUERY_URL, lon, lat, stage="San Jose flood zone"
         )
     except HTTPException as exc:
-        return {
-            "status": "error",
-            "in_sfha": None, "zone": None,
-            "detail": "Flood lookup failed; verify with FEMA NFHL.",
-            "source": None,
-            "error": exc.detail,
-        }
+        return FetchResult.failed(exc.detail, _SRC_SJ)
+
     if attrs:
         in_sfha, zone = _parse_flood_zone(attrs[0])
-        return {
-            "in_sfha": in_sfha, "zone": zone,
-            "detail": f"Zone: {zone} (San Jose Flood Hazard Area).",
-            "source": "San Jose OPN Flood Hazard Area layer 439",
-        }
-    return {
-        "in_sfha": False, "zone": "X or D",
-        "detail": "No Special Flood Hazard Area feature at this location.",
-        "source": "San Jose OPN Flood Hazard Area layer 439",
-    }
+        return FetchResult.ok(
+            DesignationData(present=in_sfha, detail=f"Zone: {zone} (San Jose Flood Hazard Area)."),
+            _SRC_SJ,
+        )
+    return FetchResult.absent(_SRC_SJ)
 
 
-async def fetch_geohazard(client: httpx.AsyncClient, lat: float, lon: float) -> dict[str, Any]:
+async def fetch_geohazard(
+    client: httpx.AsyncClient, lat: float, lon: float
+) -> FetchResult[DesignationData]:
+    _SRC = "San Jose PLN Land Designations layer 31"
     try:
         attrs = await _attrs_point(
             client, SAN_JOSE_GEOHAZARD_QUERY_URL, lon, lat, stage="San Jose geohazard"
         )
     except HTTPException as exc:
-        return {
-            "status": "error",
-            "in_zone": None,
-            "detail": "Geohazard lookup failed; verify with SJPermits geohazard map.",
-            "source": None,
-            "error": exc.detail,
-        }
+        return FetchResult.failed(exc.detail, _SRC)
+
     if attrs:
         name = attrs[0].get("NAME") or attrs[0].get("TYPE") or "Hazardous/geologic zone"
-        return {
-            "in_zone": True,
-            "detail": f"In designated area: {name}.",
-            "source": "San Jose PLN Land Designations layer 31",
-        }
-    return {
-        "in_zone": False,
-        "detail": "No geologic hazard designation feature at this location.",
-        "source": "San Jose PLN Land Designations layer 31",
-    }
+        return FetchResult.ok(
+            DesignationData(present=True, detail=f"In designated area: {name}."),
+            _SRC,
+        )
+    return FetchResult.absent(_SRC)
 
 
 async def fetch_historic(
     client: httpx.AsyncClient, lat: float, lon: float, parcel_feature: dict[str, Any]
-) -> dict[str, Any]:
+) -> FetchResult[DesignationData]:
+    _SRC = "San Jose OPN HRI layer 406 / Historic Area layer 408"
     west, south, east, north = shape(parcel_feature["geometry"]).bounds
     try:
         hri_points, historic_area = await asyncio.gather(
@@ -172,75 +165,57 @@ async def fetch_historic(
             ),
         )
     except HTTPException as exc:
-        return {
-            "status": "error",
-            "on_inventory": None,
-            "detail": "Historic lookup failed; verify with City HRI map.",
-            "source": None,
-            "error": exc.detail,
-        }
+        return FetchResult.failed(exc.detail, _SRC)
+
     if hri_points or historic_area:
-        return {
-            "on_inventory": True,
-            "detail": "Historic Resources Inventory point or Historic Area intersects this parcel.",
-            "source": "San Jose OPN HRI layer 406 / Historic Area layer 408",
-        }
-    return {
-        "on_inventory": False,
-        "detail": "No HRI point or Historic Area feature found for this parcel.",
-        "source": "San Jose OPN HRI layer 406 / Historic Area layer 408",
-    }
-
-
-async def fetch_wui(client: httpx.AsyncClient, lat: float, lon: float) -> dict[str, Any]:
-    try:
-        attrs = await _attrs_point(
-            client, SAN_JOSE_WUI_QUERY_URL, lon, lat, stage="San Jose WUI"
+        return FetchResult.ok(
+            DesignationData(
+                present=True,
+                detail="Historic Resources Inventory point or Historic Area intersects this parcel.",
+            ),
+            _SRC,
         )
+    return FetchResult.absent(_SRC)
+
+
+async def fetch_wui(
+    client: httpx.AsyncClient, lat: float, lon: float
+) -> FetchResult[DesignationData]:
+    _SRC_SJ = "San Jose OPN WUI layer 283"
+    _SRC_USDA = "USDA WUI"
+
+    try:
+        attrs = await _attrs_point(client, SAN_JOSE_WUI_QUERY_URL, lon, lat, stage="San Jose WUI")
         if attrs:
             name = attrs[0].get("NAME") or attrs[0].get("TYPE") or "WUI"
-            return {
-                "in_wui": True,
-                "detail": f"In Fire Wildland-Urban Interface: {name}.",
-                "source": "San Jose OPN WUI layer 283",
-            }
-        return {
-            "in_wui": False,
-            "detail": "Not in WUI per San Jose Fire WUI layer.",
-            "source": "San Jose OPN WUI layer 283",
-        }
+            return FetchResult.ok(
+                DesignationData(present=True, detail=f"In Fire Wildland-Urban Interface: {name}."),
+                _SRC_SJ,
+            )
+        return FetchResult.absent(_SRC_SJ)
     except HTTPException as exc:
         logger.info("San Jose WUI lookup failed, trying USDA fallback: %s", exc.detail)
 
     try:
-        attrs = await _attrs_point(
-            client, USDA_WUI_QUERY_URL, lon, lat, stage="USDA WUI"
-        )
+        attrs = await _attrs_point(client, USDA_WUI_QUERY_URL, lon, lat, stage="USDA WUI")
     except HTTPException as exc:
-        return {
-            "status": "error",
-            "in_wui": None,
-            "detail": "WUI lookup failed; verify with SJPermits WUI map.",
-            "source": None,
-            "error": exc.detail,
-        }
+        return FetchResult.failed(exc.detail, _SRC_USDA)
+
     if not attrs:
-        return {
-            "in_wui": False,
-            "detail": "Not in WUI per USDA fallback layer.",
-            "source": "USDA WUI",
-        }
-    wui_class = attrs[0].get("Class_N") or attrs[0].get("WUI_CLASS") or attrs[0].get("CLASS") or "WUI"
-    return {
-        "in_wui": True,
-        "detail": f"WUI class: {wui_class}.",
-        "source": "USDA WUI",
-    }
+        return FetchResult.absent(_SRC_USDA)
+    wui_class = (
+        attrs[0].get("Class_N") or attrs[0].get("WUI_CLASS") or attrs[0].get("CLASS") or "WUI"
+    )
+    return FetchResult.ok(
+        DesignationData(present=True, detail=f"WUI class: {wui_class}."),
+        _SRC_USDA,
+    )
 
 
 async def fetch_heritage_trees(
     client: httpx.AsyncClient, parcel_feature: dict[str, Any]
-) -> dict[str, Any]:
+) -> FetchResult[DesignationData]:
+    _SRC = "San Jose OPN Heritage Trees layer 511"
     parcel_geom = shape(parcel_feature["geometry"]).buffer(0)
     west, south, east, north = parcel_geom.bounds
     try:
@@ -254,27 +229,17 @@ async def fetch_heritage_trees(
             stage="San Jose heritage trees",
         )
     except HTTPException as exc:
-        return {
-            "status": "error",
-            "has_heritage_tree": None,
-            "count": None,
-            "detail": "Heritage tree lookup failed; verify at sanjoseca.gov/TreePermit.",
-            "source": None,
-            "error": exc.detail,
-        }
+        return FetchResult.failed(exc.detail, _SRC)
+
     if attrs:
-        return {
-            "has_heritage_tree": True,
-            "count": len(attrs),
-            "detail": f"{len(attrs)} heritage tree record(s) found on or near this parcel.",
-            "source": "San Jose OPN Heritage Trees layer 511",
-        }
-    return {
-        "has_heritage_tree": False,
-        "count": 0,
-        "detail": "No heritage tree records found on or near this parcel.",
-        "source": "San Jose OPN Heritage Trees layer 511",
-    }
+        return FetchResult.ok(
+            DesignationData(
+                present=True,
+                detail=f"{len(attrs)} heritage tree record(s) found on or near this parcel.",
+            ),
+            _SRC,
+        )
+    return FetchResult.absent(_SRC)
 
 
 async def fetch_all(
@@ -282,7 +247,7 @@ async def fetch_all(
     latitude: float,
     longitude: float,
     parcel_feature: dict[str, Any],
-) -> dict[str, Any]:
+) -> dict[str, FetchResult[DesignationData]]:
     """Fetch all five designation lookups concurrently."""
     flood, geohazard, historic, wui, heritage = await asyncio.gather(
         fetch_flood(client, latitude, longitude),
