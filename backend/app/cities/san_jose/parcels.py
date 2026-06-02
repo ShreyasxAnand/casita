@@ -18,8 +18,8 @@ from fastapi import HTTPException
 from shapely.errors import GEOSException
 from shapely.geometry import Point, shape
 
-from app.clients.arcgis_geometry import feature_to_geojson
 from app.services import arcgis
+from app.services.arcgis_geometry import feature_to_geojson
 
 logger = logging.getLogger(__name__)
 

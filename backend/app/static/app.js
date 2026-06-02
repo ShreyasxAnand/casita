@@ -7,10 +7,17 @@
     const FT_TO_M = 0.3048;
     const M2_TO_FT2 = 10.7639104167;
     const REAL3D_CONTEXT_PAD_M = 15;
+    function getSelectedCity() {
+      const el = document.getElementById('citySelect');
+      const v = (el && el.value || '').trim().toLowerCase();
+      return v || 'san_jose';
+    }
+
     const els = {
       app: document.getElementById('app'),
       sidebarToggle: document.getElementById('sidebarToggle'),
       form: document.getElementById('siteForm'),
+      citySelect: document.getElementById('citySelect'),
       address: document.getElementById('address'),
       aduTypeSeg: document.getElementById('aduTypeSeg'),
       aduTypeHint: document.getElementById('aduTypeHint'),
@@ -25,6 +32,15 @@
       statusDot: document.getElementById('statusDot'),
       statusText: document.getElementById('statusText'),
       stageList: document.getElementById('stageList'),
+      stageLog: document.getElementById('stageLog'),
+      checklistSummary: document.getElementById('checklistSummary'),
+      sidebarWidth: document.getElementById('sidebarWidth'),
+      sidebarDepth: document.getElementById('sidebarDepth'),
+      sidebarHeight: document.getElementById('sidebarHeight'),
+      sidebarHeightLabel: document.getElementById('sidebarHeightLabel'),
+      sidebarHeightVal: document.getElementById('sidebarHeightVal'),
+      sidebarSizeStat: document.getElementById('sidebarSizeStat'),
+      sidebarRequirements: document.getElementById('sidebarRequirements'),
       metrics: document.getElementById('metrics'),
       phase1Checklist: document.getElementById('phase1Checklist'),
       phase2Checklist: document.getElementById('phase2Checklist'),
@@ -84,6 +100,7 @@
     let zipContext = null;
     let financing = null;
     let aduTypeVal = 'detached'; // 'detached' | 'attached' | 'jadu'
+    let standardsVal = 'city';  // 'city' | 'state'
     let displayUnit = localStorage.getItem('aduMvpUnit') || 'ft'; // 'ft' | 'm'
     let parcelGroup, buildingGroup, buildableGroup, imageryGroup, aduMesh;
     let imageryPlane = null;
@@ -97,6 +114,10 @@
     })();
     function debugWarn(...args) { if (DEBUG) console.warn(...args); }
     function debugLog(...args) { if (DEBUG) console.log(...args); }
+    if (DEBUG) {
+      const dbgSec = document.getElementById('sidebarDebugSection');
+      if (dbgSec) dbgSec.hidden = false;
+    }
     let hideStructureMode = false;
     let floorMaterial = null;
     const floorTextureCache = new Map();
@@ -150,6 +171,7 @@
         return raw ? { ...ADU_STYLE_DEFAULTS, ...JSON.parse(raw) } : { ...ADU_STYLE_DEFAULTS };
       } catch { return { ...ADU_STYLE_DEFAULTS }; }
     })();
+    let selectedFrontEdgeIdx = null; // index into parcel rings_local[0] edges; null = not set
     let houseState = { x: 0, y: 0, rot: 0 };
     let houseEditMode = false;
     let houseEditTrim = null; // glow ring shown only in edit mode
@@ -187,20 +209,30 @@
       return data;
     }
 
-    async function loadSite() {
+    async function loadSite({ keepFrontEdge = false } = {}) {
       if (!els.address.value.trim()) {
         setStatus('Enter an address to get started.', '');
         return;
       }
+      if (!keepFrontEdge) selectedFrontEdgeIdx = null;
       setStatus('Loading parcel and building footprints...', 'busy');
       disableBusy(true);
+      if (els.stageLog) {
+        els.stageLog.removeAttribute('hidden');
+        els.stageLog.innerHTML = '<div class="stage-log-loading"><span class="stage-log-spinner"></span><span>Analyzing property…</span></div>';
+      }
       try {
         const data = await postJson('/api/site', {
+          city: getSelectedCity(),
           address: els.address.value.trim(),
           include_checklist: true,
+          standards: standardsVal,
           adu_type: aduTypeVal,
+          adu_stories: currentFloors,
           adu_width_ft: Number(els.aduWidth.value) || 30,
           adu_depth_ft: Number(els.aduDepth.value) || 40,
+          adu_height_ft: Number(els.sidebarHeight?.value || els.height?.value) || 16,
+          front_edge_index: selectedFrontEdgeIdx,
         });
         siteModel = data.site_model;
         propertyStats = data.property_stats || null;
@@ -218,15 +250,19 @@
         renderDebug(data);
         renderStages(data.stages || []);
         buildScene();
+        renderFrontEdgePicker();
         // Compute best-fitting initial ADU dimensions for the 3D view.
         const initialAdu = chooseInitialAdu();
         if (initialAdu) {
           els.aduWidth.value = String(Math.round(initialAdu.widthFt));
           els.aduDepth.value = String(Math.round(initialAdu.depthFt));
         }
+        syncSidebarDims();
         renderMetrics();
         // Two-phase checklist UI
-        renderPhase1(data.checklist?.san_jose_checklist || []);
+        const _siteChecklistItems = data.checklist?.items || [];
+        _allChecklistItems = _siteChecklistItems;
+        renderPhase1(_siteChecklistItems);
         renderDataWarnings(data.data_warnings || []);
         renderAduPicker(data.property_stats);
         els.phase2Section.setAttribute('hidden', '');
@@ -234,8 +270,6 @@
         const real3dVisible = !els.real3dPanel.hidden;
         if (real3dVisible && cesiumViewer) {
           requestAnimationFrame(() => syncReal3dScene());
-        } else {
-          showTab('checklist');
         }
         // UX reveal — show all deferred sections
         document.getElementById('welcomeState')?.remove();
@@ -249,7 +283,6 @@
         setStatus('Site loaded — choose an ADU type to see design requirements.', 'ok');
         pushUrlState();
         { const cta = document.getElementById('complianceCta'); if (cta) cta.hidden = false; }
-        { const sw = document.getElementById('stageListWrap'); if (sw) sw.hidden = false; }
       } catch (err) {
         setStatus(err.message || 'Site failed to load', 'err');
       } finally {
@@ -463,12 +496,121 @@
       mats.forEach(m => m && m.dispose && m.dispose());
     }
 
+    // ── Front property line picker ────────────────────────────────────────
+
+    function renderFrontEdgePicker() {
+      const picker = document.getElementById('frontEdgePicker');
+      const svg = document.getElementById('frontEdgeSvg');
+      if (!picker || !svg || !siteModel) return;
+
+      const ring = siteModel.parcel?.rings_local?.[0];
+      if (!ring || ring.length < 4) return;
+
+      // Coordinate transform: local UTM meters → SVG pixels, Y flipped
+      const SVG_SIZE = 200, PAD = 18;
+      const xs = ring.map(p => p[0]), ys = ring.map(p => p[1]);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      const w = (maxX - minX) || 1, h = (maxY - minY) || 1;
+      const scale = (SVG_SIZE - 2 * PAD) / Math.max(w, h);
+      const ox = PAD + ((SVG_SIZE - 2 * PAD) - w * scale) / 2;
+      const oy = PAD + ((SVG_SIZE - 2 * PAD) - h * scale) / 2;
+      const toSvg = (x, y) => [
+        ox + (x - minX) * scale,
+        SVG_SIZE - oy - (y - minY) * scale,
+      ];
+
+      // Closed ring: first and last point are the same; N-1 unique edges
+      const n = ring.length;
+      const isClosed = ring[0][0] === ring[n - 1][0] && ring[0][1] === ring[n - 1][1];
+      const edgeCount = isClosed ? n - 1 : n;
+
+      let html = '';
+
+      // Parcel fill
+      const pts = ring.slice(0, isClosed ? n - 1 : n)
+        .map(p => toSvg(p[0], p[1]).join(','))
+        .join(' ');
+      html += `<polygon points="${pts}" fill="rgba(94,173,168,0.10)" stroke="none"/>`;
+
+      // Existing buildings for orientation context
+      for (const b of (siteModel.buildings || [])) {
+        const bRing = b.rings_local?.[0];
+        if (!bRing) continue;
+        const bPts = bRing.map(p => toSvg(p[0], p[1]).join(',')).join(' ');
+        html += `<polygon points="${bPts}" fill="rgba(79,90,82,0.22)" stroke="rgba(79,90,82,0.4)" stroke-width="1"/>`;
+      }
+
+      // Buildable zone (green) — reflects front setback when a front edge is set
+      for (const poly of (siteModel.buildable_zone?.polygons || [])) {
+        const zRing = poly.rings_local?.[0];
+        if (!zRing) continue;
+        const zPts = zRing.map(p => toSvg(p[0], p[1]).join(',')).join(' ');
+        html += `<polygon points="${zPts}" fill="rgba(58,163,92,0.28)" stroke="rgba(58,163,92,0.7)" stroke-width="1.2"/>`;
+      }
+
+      // Edges: visible thin line + wide transparent hit area per edge
+      for (let i = 0; i < edgeCount; i++) {
+        const p1 = toSvg(ring[i][0], ring[i][1]);
+        const p2 = toSvg(ring[(i + 1) % n][0], ring[(i + 1) % n][1]);
+        const d = `M${p1[0].toFixed(1)},${p1[1].toFixed(1)} L${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+        const selCls = i === selectedFrontEdgeIdx ? ' selected' : '';
+        html += `<path class="fe-edge${selCls}" data-idx="${i}" d="${d}"/>`;
+        html += `<path class="fe-hit" data-idx="${i}" d="${d}"/>`;
+      }
+
+      // North indicator
+      html += `<text x="192" y="13" font-size="8" fill="rgba(94,160,156,0.7)" text-anchor="end" font-family="Inter,sans-serif" pointer-events="none">N↑</text>`;
+
+      svg.innerHTML = html;
+
+      // Wire hit areas: hover highlight + click to select
+      svg.querySelectorAll('.fe-hit').forEach(hit => {
+        const idx = Number(hit.dataset.idx);
+        const edge = hit.previousElementSibling;
+
+        hit.addEventListener('pointerenter', () => {
+          if (idx !== selectedFrontEdgeIdx) edge.classList.add('hovered');
+        });
+        hit.addEventListener('pointerleave', () => {
+          edge.classList.remove('hovered');
+        });
+        hit.addEventListener('click', () => {
+          selectedFrontEdgeIdx = idx;
+          renderFrontEdgePicker();
+          _updateFrontEdgeMsg();
+          loadSite({ keepFrontEdge: true });
+        });
+      });
+
+      picker.hidden = false;
+      _updateFrontEdgeMsg();
+    }
+
+    function _updateFrontEdgeMsg() {
+      const msg = document.getElementById('frontEdgeMsg');
+      if (!msg) return;
+      if (selectedFrontEdgeIdx === null) {
+        msg.innerHTML = 'Tap an edge to mark your front property line';
+        msg.style.color = '';
+      } else {
+        msg.innerHTML =
+          `<span style="color:var(--ok);font-weight:600;">✓ Front property line set</span>` +
+          `<br><button class="front-edge-clear" id="frontEdgeClearBtn" type="button">Change selection</button>`;
+        document.getElementById('frontEdgeClearBtn')?.addEventListener('click', () => {
+          selectedFrontEdgeIdx = null;
+          renderFrontEdgePicker();
+          loadSite({ keepFrontEdge: true });
+        });
+      }
+    }
+
     // ── Scene assembly ────────────────────────────────────────────────────
     // `buildScene()` orchestrates a full rebuild of the Three.js model viewer
     // from the current `siteModel`. Each phase is delegated to a small
     // single-purpose helper so the high-level sequence reads as a recipe.
 
-    function buildScene() {
+    function buildScene(options = {}) {
       resetSceneGroups();
       buildSiteFloor();
       buildHouses();
@@ -476,7 +618,7 @@
       // render them here. Subsequent edits to the house trigger a client-side
       // recompute via `markSiteDirty()`.
       renderBuildableZone(siteModel.buildable_zone.polygons.map(p => p.rings_local));
-      placeInitialAdu();
+      placeInitialAdu(options);
       frameSite();
       updateHud();
     }
@@ -543,10 +685,14 @@
 
     // Seed `aduState` from the best auto-fit placement, apply type-specific
     // snapping, and build the ADU mesh.
-    function placeInitialAdu() {
-      const initialAdu = chooseInitialAdu();
-      const firstPlacement = initialAdu?.placement || siteModel.adu.placements[0];
-      if (initialAdu) {
+    function placeInitialAdu({ preserveDimensions = false } = {}) {
+      const currentWidthFt = Number(els.aduWidth.value) || 30;
+      const currentDepthFt = Number(els.aduDepth.value) || 40;
+      const initialAdu = preserveDimensions ? null : chooseInitialAdu();
+      const firstPlacement = preserveDimensions
+        ? (findAduPlacement(currentWidthFt, currentDepthFt) || siteModel.adu.placements[0])
+        : (initialAdu?.placement || siteModel.adu.placements[0]);
+      if (initialAdu && !preserveDimensions) {
         els.aduWidth.value = String(Math.round(initialAdu.widthFt));
         els.aduDepth.value = String(Math.round(initialAdu.depthFt));
       }
@@ -561,10 +707,11 @@
       } else {
         // No auto-fit candidate (e.g. ADU larger than buildable zone). Drop
         // the ADU at the parcel centroid so the user can still drag it and
-        // see what fits.
+        // see what fits. Always orient with the parcel so it doesn't look crooked.
         aduState.x = 0;
         aduState.y = 0;
-        aduState.rot = 0;
+        const propertyAxis = Number(siteModel?.adu?.suggested_rotation_deg || 0);
+        aduState.rot = aduRotationForAxis(propertyAxis, aduState.widthM, aduState.depthM);
         els.snapBtn.disabled = true;
       }
       els.rotation.value = String(Math.round(aduState.rot));
@@ -878,16 +1025,63 @@
     }
 
     function renderStages(stages) {
-      els.stageList.innerHTML = stages.map(s => `
-        <div class="stage">
-          <span class="badge ${s.status}">${s.status}</span>
-          <span>${escapeHtml(s.name)}${s.detail ? ': ' + escapeHtml(s.detail) : ''}</span>
-          <span>${s.duration_ms || 0} ms</span>
-        </div>
-      `).join('');
+      const log = els.stageLog;
+      if (!log) return;
+      log.removeAttribute('hidden');
+      log.innerHTML = '';
+      stages.forEach((s, i) => {
+        const entry = document.createElement('div');
+        entry.className = 'stage-log-entry';
+        entry.style.animationDelay = `${i * 55}ms`;
+        const dotClass = s.status === 'ok' ? 'ok' : s.status === 'failed' ? 'fail' : s.status === 'warn' ? 'warn' : '';
+        const detailHtml = s.detail ? `: <span class="stage-log-detail">${escapeHtml(s.detail)}</span>` : '';
+        entry.innerHTML = `
+          <span class="stage-log-dot ${dotClass}"></span>
+          <span class="stage-log-name">${escapeHtml(s.name)}${detailHtml}</span>
+          <span class="stage-log-dur">${s.duration_ms || 0} ms</span>`;
+        log.appendChild(entry);
+      });
     }
 
-    const _CHECK_ICONS = { pass: '✓', fail: '✗', verify: '?', info: 'i', unavailable: '–' };
+    const _CHECK_ICONS = { pass: '✓', fail: '✗', verify: '!', info: 'i', unavailable: '–' };
+
+    const _PART_LABELS = {
+      1: 'Property Qualification',
+      2: 'Property Designations',
+      3: 'Development Standards',
+      4: 'Fire Safety',
+      5: 'Miscellaneous',
+    };
+
+    function _renderCheckItem(item) {
+      const icon = _CHECK_ICONS[item.status] || '?';
+      const st = escapeHtml(String(item.status));
+      const qNum = item.number != null ? `<span class="check-partnum">Q${item.number}</span>` : '';
+      return `<div class="check" data-status="${st}">
+        <div class="check-row">
+          <div class="check-icon ${st}">${icon}</div>
+          <div>
+            <div class="check-header">${qNum}<span class="check-q">${escapeHtml(item.question || '')}</span></div>
+            <div class="check-detail">${escapeHtml(item.detail || '')}</div>
+            ${item.source ? `<div class="meta">Source: ${escapeHtml(item.source)}</div>` : ''}
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function renderChecklistSummary(items) {
+      const el = els.checklistSummary;
+      if (!el) return;
+      const counts = { fail: 0, verify: 0, pass: 0, unavailable: 0 };
+      items.forEach(item => { if (item.status in counts) counts[item.status]++; });
+      const parts = [];
+      if (counts.fail) parts.push(`<span class="summary-pill fail">${counts.fail} issue${counts.fail !== 1 ? 's' : ''}</span>`);
+      if (counts.verify) parts.push(`<span class="summary-pill verify">${counts.verify} to verify</span>`);
+      if (counts.pass) parts.push(`<span class="summary-pill pass">${counts.pass} pass</span>`);
+      if (counts.unavailable) parts.push(`<span class="summary-pill unavail">${counts.unavailable} unavailable</span>`);
+      el.innerHTML = parts.join('');
+      el.hidden = !parts.length;
+    }
 
     function renderCheckItems(container, items) {
       if (!container) return;
@@ -895,23 +1089,31 @@
         container.innerHTML = '<div class="check" data-status="info"><div style="color:var(--text-soft);font-size:13px;">No items for this phase.</div></div>';
         return;
       }
-      container.innerHTML = items.map(item => {
-        const icon = _CHECK_ICONS[item.status] || '?';
-        const qNum = item.number != null ? `<span class="check-partnum">Q${item.number}</span>` : '';
-        return `<div class="check" data-status="${escapeHtml(String(item.status))}">
-          <div class="check-row">
-            <div class="check-icon ${escapeHtml(String(item.status))}">${icon}</div>
-            <div>
-              <div class="check-header">
-                ${qNum}
-                <span class="check-q">${escapeHtml(item.question || '')}</span>
-              </div>
-              <div class="check-detail">${escapeHtml(item.detail || '')}</div>
-              ${item.source ? `<div class="meta">Source: ${escapeHtml(item.source)}</div>` : ''}
-            </div>
+      // Group by part
+      const groups = new Map();
+      items.forEach(item => {
+        const p = item.part ?? 0;
+        if (!groups.has(p)) groups.set(p, []);
+        groups.get(p).push(item);
+      });
+      let html = '';
+      for (const [part, partItems] of [...groups.entries()].sort((a, b) => a[0] - b[0])) {
+        const label = _PART_LABELS[part] || `Part ${part}`;
+        const failCount  = partItems.filter(i => i.status === 'fail').length;
+        const verifyCount = partItems.filter(i => i.status === 'verify').length;
+        let badgeCls, badgeTxt;
+        if (failCount)        { badgeCls = 'fail';   badgeTxt = `${failCount} issue${failCount !== 1 ? 's' : ''}`; }
+        else if (verifyCount) { badgeCls = 'verify'; badgeTxt = `${verifyCount} to verify`; }
+        else                  { badgeCls = 'pass';   badgeTxt = 'All clear'; }
+        html += `<div class="checklist-group">
+          <div class="checklist-group-header">
+            <span class="checklist-group-title">${escapeHtml(label)}</span>
+            <span class="group-badge ${badgeCls}">${badgeTxt}</span>
           </div>
+          <div class="checklist-group-items">${partItems.map(_renderCheckItem).join('')}</div>
         </div>`;
-      }).join('');
+      }
+      container.innerHTML = html;
     }
 
     function renderDataWarnings(warnings) {
@@ -934,10 +1136,25 @@
 
     function renderPhase1(items) {
       const phase1 = items.filter(item => item.part < 3 || (item.part === 3 && item.number === 10));
+      renderChecklistSummary(phase1);
       renderCheckItems(els.phase1Checklist, phase1);
     }
 
+    function backendConstraintsFor(type = aduTypeVal, floors = currentFloors) {
+      const c = siteModel?.applied_constraints;
+      if (!c) return null;
+      if ((siteModel?.adu_type || '').toLowerCase() !== type) return null;
+      if ((siteModel?.standards || '').toLowerCase() !== standardsVal) return null;
+      if (Number(siteModel?.adu_stories || 1) !== Number(floors || 1)) return null;
+      return c;
+    }
+
     function regulatoryMaxSqft(type, parcelFt2, primarySqft) {
+      // Use backend-resolved constraints when available and type matches
+      const c = backendConstraintsFor(type);
+      if (c?.max_adu_size_sf != null) return c.max_adu_size_sf;
+      if (standardsVal === 'state') return type === 'jadu' ? 500 : 800;
+      // Fallback: city-standard approximation for not-yet-selected cards.
       const SMALL_LOT = 9000, SMALL_CAP = 1000, LARGE_CAP = 1200;
       if (type === 'jadu') return 500;
       const lotCap = (!parcelFt2 || parcelFt2 < SMALL_LOT) ? SMALL_CAP : LARGE_CAP;
@@ -945,22 +1162,36 @@
       return lotCap;
     }
 
+    const _ADU_ICONS = {
+      detached: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><path d="M3 10.5L12 3l9 7.5V21a1 1 0 01-1 1H4a1 1 0 01-1-1V10.5z"/><path d="M9 22v-7h6v7"/></svg>`,
+      attached:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><path d="M1 10.5L7 4l6 6.5V20H1V10.5z"/><path d="M13 11l4-4 6 4V20H13V11z"/></svg>`,
+      jadu:      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><path d="M2 11L12 3l10 8V22H2V11z"/><path d="M9 22v-5h6v5"/><path d="M12 12v10" stroke-dasharray="2 2.5"/></svg>`,
+    };
+    const _CARD_CHECK = `<div class="adu-card-check" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="2 6 5 9 10 3"/></svg></div>`;
+
     function renderAduPicker(stats) {
       if (!els.aduTypeCards) return;
       const parcelFt2 = siteModel?.parcel?.area_ft2 || 0;
       const primarySqft = (stats?.found && stats?.sqft) ? Number(stats.sqft) : 0;
       const types = [
-        { val: 'detached', label: 'Detached', hint: 'Standalone in rear yard' },
+        {
+          val: 'detached',
+          label: 'Detached',
+          hint: standardsVal === 'state' ? 'Standalone, no siting restriction' : 'Standalone in rear yard',
+        },
         { val: 'attached', label: 'Attached', hint: 'Shares wall with main home' },
         { val: 'jadu', label: 'JADU', hint: 'Within existing footprint' },
       ];
       els.aduTypeCards.innerHTML = types.map(t => {
         const maxSf = Math.round(regulatoryMaxSqft(t.val, parcelFt2, primarySqft));
-        return `<div class="adu-card${t.val === aduTypeVal ? ' selected' : ''}" data-type="${t.val}">
+        const sel = t.val === aduTypeVal;
+        return `<div class="adu-card${sel ? ' selected' : ''}" data-type="${t.val}" role="radio" aria-checked="${sel}">
+          <div class="adu-card-icon">${_ADU_ICONS[t.val] || ''}</div>
           <div class="adu-card-title">${t.label}</div>
-          <div class="adu-card-max">${formatNumber(maxSf)}<span style="font-size:13px;font-weight:500;"> sf</span></div>
+          <div class="adu-card-hint" style="margin-bottom:14px;">${escapeHtml(t.hint)}</div>
+          <div class="adu-card-max">${formatNumber(maxSf)}<span class="adu-card-max-unit"> sf</span></div>
           <div class="adu-card-hint">regulatory max</div>
-          <div class="adu-card-hint" style="margin-top:5px;">${escapeHtml(t.hint)}</div>
+          ${_CARD_CHECK}
         </div>`;
       }).join('');
     }
@@ -998,41 +1229,278 @@
         </div>`;
     }
 
+    // All checklist items from the most recent type-fetch; used by the Checklist step.
+    let _allChecklistItems = [];
+
+    function renderSidebarLimits(type) {
+      const card = document.getElementById('sidebarLimitsCard');
+      const section = document.getElementById('sidebarLimitsSection');
+      if (!card) return;
+
+      const parcelFt2 = siteModel?.parcel?.area_ft2 || 0;
+      const primarySqft = (propertyStats?.found && propertyStats?.sqft) ? Number(propertyStats.sqft) : 0;
+      const maxSf = Math.round(regulatoryMaxSqft(type, parcelFt2, primarySqft));
+
+      const maxHeightFt = _maxHeightForType(type, currentFloors);
+      const floorLabel = type === 'detached'
+        ? (currentFloors === 1 ? '1-story max' : '2-story max')
+        : (type === 'jadu' ? 'matches existing' : null);
+      const maxHeight = type === 'jadu'
+        ? 'matches existing'
+        : `${maxHeightFt} ft${floorLabel ? ` (${floorLabel})` : ''}`;
+
+      const c = backendConstraintsFor(type);
+      let setbackText;
+      if (type === 'jadu') {
+        setbackText = 'No independent setback — JADU must remain within the existing primary structure or attached garage.';
+      } else if (c) {
+        const parts = [`Front: ${c.front_setback_ft} ft`];
+        if (c.siting_min_front_offset_ft != null) parts.push(`siting ≥ ${c.siting_min_front_offset_ft} ft from front`);
+        parts.push(`Side: ${c.min_side_setback_ft} ft · Rear: ${c.min_rear_setback_ft} ft`);
+        if (c.min_building_separation_ft != null) parts.push(`${c.min_building_separation_ft} ft from main home`);
+        if (c.front_setback_encroachment_active) parts.push('Front setback waived (§20.80.176 — 800 sf rule)');
+        setbackText = parts.join('. ');
+      } else {
+        const setbackByType = standardsVal === 'state'
+          ? {
+              detached: 'Side/rear: 4 ft. Front setback per zoning district unless the 800 sf state exception applies. No siting restriction.',
+              attached: 'Side/rear: 4 ft. Front setback per zoning district unless the 800 sf state exception applies. No siting restriction.',
+              jadu: 'No additional setback — within existing primary structure footprint.',
+            }
+          : {
+              detached: '≥ 45 ft from front property line, or behind main home. Min 6 ft separation.',
+              attached: 'Per zoning district Table 20-60. No additional side/rear setback required.',
+              jadu: 'No additional setback — within existing primary structure footprint.',
+            };
+        setbackText = setbackByType[type] || '';
+      }
+
+      const w = Number(els.sidebarWidth?.value || els.aduWidth.value) || 30;
+      const d = Number(els.sidebarDepth?.value || els.aduDepth.value) || 40;
+      const currentSf = w * d;
+      const over = currentSf > maxSf;
+
+      card.innerHTML = `
+        <div class="sidebar-limit-row">
+          <span class="sidebar-limit-label">Max floor area</span>
+          <span class="sidebar-limit-value${over ? ' over' : ''}">${formatNumber(maxSf)} sf</span>
+        </div>
+        <div class="sidebar-limit-row">
+          <span class="sidebar-limit-label">Max height</span>
+          <span class="sidebar-limit-value">${escapeHtml(maxHeight)}</span>
+        </div>
+        <div class="sidebar-setback-warn">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span>${escapeHtml(setbackText)}</span>
+        </div>`;
+      if (section) section.hidden = false;
+    }
+
+    // Track dims at last checklist fetch so we can warn when they're stale
+    let _checklistDims = { w: 0, d: 0, h: 0, floors: 0, type: '', standards: '' };
+
+    function renderFullChecklist(items) {
+      const summaryEl = document.getElementById('fullChecklistSummary');
+      const container = document.getElementById('fullChecklist');
+      const tabBar    = document.getElementById('checklistTabBar');
+      if (!container) return;
+
+      // Summary pills
+      if (summaryEl) {
+        const counts = { fail: 0, verify: 0, pass: 0, info: 0, unavailable: 0 };
+        items.forEach(item => { if (item.status in counts) counts[item.status]++; });
+        const parts = [];
+        if (counts.fail)        parts.push(`<span class="summary-pill fail">${counts.fail} issue${counts.fail !== 1 ? 's' : ''}</span>`);
+        if (counts.verify)      parts.push(`<span class="summary-pill verify">${counts.verify} to verify</span>`);
+        if (counts.pass)        parts.push(`<span class="summary-pill pass">${counts.pass} pass</span>`);
+        if (counts.unavailable) parts.push(`<span class="summary-pill unavail">${counts.unavailable} unavailable</span>`);
+        summaryEl.innerHTML = parts.join('');
+        summaryEl.hidden = !parts.length;
+      }
+
+      // Build per-part map
+      const partGroups = new Map();
+      items.forEach(item => {
+        const p = item.part ?? 0;
+        if (!partGroups.has(p)) partGroups.set(p, []);
+        partGroups.get(p).push(item);
+      });
+      const sortedParts = [...partGroups.keys()].sort((a, b) => a - b);
+
+      function partBadgeCls(pItems) {
+        if (pItems.some(i => i.status === 'fail')) return 'fail';
+        if (pItems.some(i => i.status === 'verify')) return 'verify';
+        return 'pass';
+      }
+
+      function renderTabContent(part) {
+        if (part === 'all') {
+          renderCheckItems(container, items);
+        } else {
+          const pItems = partGroups.get(part) || [];
+          container.innerHTML = pItems.length
+            ? pItems.map(_renderCheckItem).join('')
+            : '<div class="check" data-status="info"><div style="color:var(--text-soft);font-size:13px;">No items in this category.</div></div>';
+        }
+      }
+
+      if (tabBar) {
+        const allFail   = items.filter(i => i.status === 'fail').length;
+        const allVerify = items.filter(i => i.status === 'verify').length;
+        const allBadgeCls = allFail ? 'fail' : allVerify ? 'verify' : 'pass';
+        const allBadgeNum = allFail || allVerify || items.filter(i => i.status === 'pass').length;
+
+        const partTabsHtml = sortedParts.map(p => {
+          const label = _PART_LABELS[p] || `Part ${p}`;
+          const pItems = partGroups.get(p);
+          const cls = partBadgeCls(pItems);
+          const failN = pItems.filter(i => i.status === 'fail').length;
+          const verN  = pItems.filter(i => i.status === 'verify').length;
+          const badgeNum = failN || verN || pItems.length;
+          return `<button class="checklist-tab-btn" data-part="${p}" role="tab" aria-selected="false">
+            ${escapeHtml(label)}<span class="cl-tab-badge ${cls}">${badgeNum}</span>
+          </button>`;
+        }).join('');
+
+        tabBar.innerHTML = `<button class="checklist-tab-btn active" data-part="all" role="tab" aria-selected="true">
+          All<span class="cl-tab-badge ${allBadgeCls}">${allBadgeNum}</span>
+        </button>${partTabsHtml}`;
+
+        tabBar.querySelectorAll('.checklist-tab-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            tabBar.querySelectorAll('.checklist-tab-btn').forEach(b => {
+              b.classList.remove('active');
+              b.setAttribute('aria-selected', 'false');
+            });
+            btn.classList.add('active');
+            btn.setAttribute('aria-selected', 'true');
+            const raw = btn.dataset.part;
+            renderTabContent(raw === 'all' ? 'all' : Number(raw));
+          });
+        });
+      }
+
+      renderTabContent('all');
+    }
+
+    function currentAduHeightFt() {
+      return Number(els.sidebarHeight?.value || els.height?.value) || 16;
+    }
+
     async function selectAduType(type) {
       applyAduType(type);
       els.aduTypeCards?.querySelectorAll('.adu-card').forEach(c => {
-        c.classList.toggle('selected', c.dataset.type === type);
+        const sel = c.dataset.type === type;
+        c.classList.toggle('selected', sel);
+        if (c.hasAttribute('aria-checked')) c.setAttribute('aria-checked', sel ? 'true' : 'false');
       });
-      // Show Phase 2 with loading placeholder
-      els.phase2Section.removeAttribute('hidden');
-      const label = type.charAt(0).toUpperCase() + type.slice(1);
-      if (els.phase2Title) els.phase2Title.textContent = `${label} ADU Requirements`;
-      els.sizeRecommendation.innerHTML = '';
-      els.phase2Checklist.innerHTML = '<div class="check"><div style="color:var(--text-soft);font-size:13px;">Loading design requirements…</div></div>';
-      const w = Number(els.aduWidth.value) || 30;
-      const d = Number(els.aduDepth.value) || 40;
+      syncSidebarDims();
+      // Reset to 1 floor for new type and update height slider max
+      currentFloors = 1;
+      document.getElementById('floorsToggle')?.querySelectorAll('.seg-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.floors === '1');
+      });
+      _updateHeightSlider(type, 1);
+      renderSidebarLimits(type);
+      const w = Number(els.sidebarWidth?.value || els.aduWidth.value) || 30;
+      const d = Number(els.sidebarDepth?.value || els.aduDepth.value) || 40;
+      const h = currentAduHeightFt();
+      // Navigate to model immediately — the CTA uses whatever _allChecklistItems is
+      // already available (seeded by loadSite). The fetch below will refine it.
+      navigateWizard(4);
+      pushUrlState();
+      const ctaSection = document.getElementById('sidebarCtaSection');
+      if (ctaSection) ctaSection.hidden = false;
+      // Show sidebar requirements loading state
+      const reqSection = document.getElementById('sidebarReqSection');
+      if (reqSection) reqSection.hidden = false;
+      if (els.sidebarRequirements) els.sidebarRequirements.innerHTML =
+        '<div style="color:var(--text-faint);font-size:11px;padding:4px 0;">Loading…</div>';
+      const refreshBtn = document.getElementById('refreshReqBtn');
+      if (refreshBtn) refreshBtn.hidden = true;
       try {
         const data = await postJson('/api/site', {
+          city: getSelectedCity(),
           address: els.address.value.trim(),
           include_checklist: true,
+          standards: standardsVal,
           adu_type: type,
+          adu_stories: currentFloors,
           adu_width_ft: w,
           adu_depth_ft: d,
+          adu_height_ft: h,
+          front_edge_index: selectedFrontEdgeIdx,
         });
-        const items = data.checklist?.san_jose_checklist || [];
+        const items = data.checklist?.items || [];
+        _allChecklistItems = items;
+        _checklistDims = { w, d, h, floors: currentFloors, type, standards: standardsVal };
         const phase2 = items.filter(item => !(item.part < 3 || (item.part === 3 && item.number === 10)));
-        renderCheckItems(els.phase2Checklist, phase2);
-        renderSizeCard(type, data.property_stats);
-        // Update 3D model sizing if server returned updated site model
         if (data.site_model) {
           siteModel = data.site_model;
-          renderAduPicker(data.property_stats);
+          propertyStats = data.property_stats || propertyStats;
+          zipContext = data.zip_context || zipContext;
+          financing = data.financing || financing;
+          _updateHeightSlider(type, currentFloors);
+          buildScene({ preserveDimensions: true });
+          renderAduPicker(propertyStats);
+          const real3dVisible = !els.real3dPanel.hidden;
+          if (real3dVisible && cesiumViewer) requestAnimationFrame(() => syncReal3dScene());
         }
+        renderSidebarRequirements(phase2);
+        renderSidebarLimits(type);
+        renderSidebarSizeStat();
+        // Keep phase2Checklist in sync for back-compat
+        renderCheckItems(els.phase2Checklist, phase2);
+        renderSizeCard(type, propertyStats || data.property_stats);
+        renderFinancing();
       } catch (err) {
-        els.phase2Checklist.innerHTML = `<div class="check" data-status="fail"><div class="check-row"><div class="check-icon fail">✗</div><div><div class="check-detail">${escapeHtml(err.message || 'Failed to load requirements')}</div></div></div></div>`;
+        if (els.sidebarRequirements)
+          els.sidebarRequirements.innerHTML =
+            `<div style="color:var(--err);font-size:11px;">${escapeHtml(err.message || 'Failed to load requirements')}</div>`;
       }
-      navigateWizard(3);
-      pushUrlState();
+    }
+
+    function syncSidebarDims() {
+      if (els.sidebarWidth)  els.sidebarWidth.value  = els.aduWidth.value;
+      if (els.sidebarDepth)  els.sidebarDepth.value  = els.aduDepth.value;
+      if (els.sidebarHeight) {
+        els.sidebarHeight.value = els.height.value;
+        if (els.sidebarHeightLabel) els.sidebarHeightLabel.textContent = els.height.value;
+        if (els.sidebarHeightVal)   els.sidebarHeightVal.textContent   = els.height.value + ' ft';
+      }
+    }
+
+    function renderSidebarSizeStat() {
+      const el = els.sidebarSizeStat;
+      if (!el || !siteModel) { if (el) el.hidden = true; return; }
+      const w = Number(els.sidebarWidth?.value || els.aduWidth.value) || 30;
+      const d = Number(els.sidebarDepth?.value || els.aduDepth.value) || 40;
+      const current = w * d;
+      const parcelFt2 = siteModel?.parcel?.area_ft2 || 0;
+      const primarySqft = (propertyStats?.found && propertyStats?.sqft) ? Number(propertyStats.sqft) : 0;
+      const regMax = Math.round(regulatoryMaxSqft(aduTypeVal, parcelFt2, primarySqft));
+      const over = current > regMax;
+      const diff = Math.abs(Math.round(current - regMax));
+      el.hidden = false;
+      el.innerHTML = `${formatNumber(Math.round(current))} sf &nbsp;·&nbsp; max ${formatNumber(regMax)} sf &nbsp;·&nbsp; <span class="${over ? 'ss-over' : 'ss-ok'}">${over ? `over ${formatNumber(diff)} sf` : `under ${formatNumber(diff)} sf`}</span>`;
+    }
+
+    function renderSidebarRequirements(items) {
+      const el = els.sidebarRequirements;
+      if (!el) return;
+      if (!items || !items.length) { el.innerHTML = ''; return; }
+      el.innerHTML = items.map(item => {
+        const st = item.status || 'unavailable';
+        const dotCls = ['pass','fail','verify','info'].includes(st) ? st : '';
+        const q = item.question || '';
+        // Strip the "Q##. " prefix for the short label — keep it readable at small size
+        const shortQ = q.replace(/^Q[\d.]+\s+/, '');
+        return `<div class="sidebar-req-item" data-status="${escapeHtml(st)}">
+          <span class="sidebar-req-dot ${dotCls}"></span>
+          <span class="sidebar-req-q">${escapeHtml(shortQ)}</span>
+          <span class="sidebar-req-badge ${escapeHtml(st)}">${escapeHtml(st)}</span>
+        </div>`;
+      }).join('');
     }
 
     function updateHud() {
@@ -1225,11 +1693,7 @@
     function basemapDescriptor(mode) {
       const imagery = siteModel?.imagery || {};
       if (mode === 'satellite') {
-        return imagery.basemaps?.satellite || {
-          label: 'Satellite',
-          url_image: imagery.url_image,
-          url_json: imagery.url_json,
-        };
+        return imagery.basemaps?.satellite || { label: 'Satellite', url_image: imagery.url_image };
       }
       if (mode === 'streets') {
         return imagery.basemaps?.streets;
@@ -1238,11 +1702,9 @@
     }
 
     function preloadBasemaps() {
-      for (const mode of ['satellite']) {
+      for (const mode of ['satellite', 'streets']) {
         const desc = basemapDescriptor(mode);
-        if (desc?.url_image) {
-          loadFloorTexture(mode, desc).catch(err => debugWarn(`${mode} basemap preload failed:`, err));
-        }
+        if (desc?.url_image) loadFloorTexture(mode, desc);
       }
     }
 
@@ -1253,17 +1715,8 @@
         els.imageryHud.textContent = 'Outline';
         return;
       }
-      if (mode === 'streets') {
-        applyProceduralFloor(0xf1f3ef, 0.97);
-        els.imageryHud.textContent = 'Street outline';
-        return;
-      }
-
       const desc = basemapDescriptor(mode);
-      if (!desc?.url_image) {
-        els.imageryHud.textContent = 'No map';
-        return;
-      }
+      if (!desc?.url_image) { els.imageryHud.textContent = 'No map'; return; }
       const cached = floorTextureCache.get(mode);
       if (cached) {
         floorMaterial.map = cached;
@@ -1275,21 +1728,15 @@
         return;
       }
       els.imageryHud.textContent = 'Loading';
-      loadFloorTexture(mode, desc)
-        .then(texture => {
-          if ((els.floorMode?.value || 'satellite') !== mode || !floorMaterial) return;
-          floorMaterial.map = texture;
-          floorMaterial.color.set(0xffffff);
-          floorMaterial.transparent = false;
-          floorMaterial.opacity = 1;
-          floorMaterial.needsUpdate = true;
-          els.imageryHud.textContent = desc.label || mode;
-        })
-        .catch(err => {
-          debugWarn('Basemap failed:', err);
-          applyProceduralFloor(0xe7ece8, 0.97);
-          els.imageryHud.textContent = 'Fallback';
-        });
+      loadFloorTexture(mode, desc).then(texture => {
+        if ((els.floorMode?.value || 'satellite') !== mode || !floorMaterial) return;
+        floorMaterial.map = texture;
+        floorMaterial.color.set(0xffffff);
+        floorMaterial.transparent = false;
+        floorMaterial.opacity = 1;
+        floorMaterial.needsUpdate = true;
+        els.imageryHud.textContent = desc.label || mode;
+      });
     }
 
     function applyProceduralFloor(color, opacity = 0.96) {
@@ -1304,30 +1751,17 @@
     function loadFloorTexture(mode, desc) {
       if (floorTextureCache.has(mode)) return Promise.resolve(floorTextureCache.get(mode));
       const loader = new THREE.TextureLoader();
-      loader.setCrossOrigin('anonymous');
-
-      // Try direct PNG (f=image) first; fall back to f=json -> href if blocked.
-      const tryDirect = () => new Promise((resolve, reject) => {
+      return new Promise((resolve, reject) => {
         loader.load(desc.url_image, resolve, undefined, reject);
+      }).then(texture => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        texture.minFilter = THREE.LinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+        floorTextureCache.set(mode, texture);
+        floorModeReady.add(mode);
+        return texture;
       });
-      const tryJsonHref = () => fetch(desc.url_json)
-        .then(r => { if (!r.ok) throw new Error('json ' + r.status); return r.json(); })
-        .then(j => { if (!j.href) throw new Error('no href'); return j.href; })
-        .then(href => new Promise((resolve, reject) => {
-          loader.load(href, resolve, undefined, reject);
-        }));
-
-      return tryDirect()
-        .catch(() => tryJsonHref())
-        .then(texture => {
-          texture.colorSpace = THREE.SRGBColorSpace;
-          texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-          texture.minFilter = THREE.LinearFilter;
-          texture.magFilter = THREE.LinearFilter;
-          floorTextureCache.set(mode, texture);
-          floorModeReady.add(mode);
-          return texture;
-        });
     }
 
     function onPointerUp(event) {
@@ -1529,10 +1963,36 @@
       aduState.y = y;
     }
 
-    function maxDetachedAduAreaFt2() {
+    function maxCurrentAduAreaFt2() {
       const parcelArea = Number(siteModel?.parcel?.area_ft2 || 0);
-      if (!parcelArea) return 1200;
-      return parcelArea >= 9000 ? 1200 : 1000;
+      const primarySqft = (propertyStats?.found && propertyStats?.sqft) ? Number(propertyStats.sqft) : 0;
+      return regulatoryMaxSqft(aduTypeVal, parcelArea, primarySqft) || 1200;
+    }
+
+    function normalizeAngleDeg(angleDeg) {
+      return ((angleDeg + 180) % 360) - 180;
+    }
+
+    function aduRotationForAxis(axisAngleDeg, widthM, depthM) {
+      // ADU rotation is the local width-axis angle. If the footprint is deeper
+      // than wide, rotate so the depth axis follows the property axis.
+      return normalizeAngleDeg(axisAngleDeg - (depthM > widthM ? 90 : 0));
+    }
+
+    function addUniqueAngle(angles, angleDeg) {
+      const normalized = normalizeAngleDeg(angleDeg);
+      if (!angles.some(existing => Math.abs(existing - normalized) <= 1)) {
+        angles.push(normalized);
+      }
+    }
+
+    function candidateAduRotations(widthM, depthM) {
+      const propertyAxis = Number(siteModel?.adu?.suggested_rotation_deg || 0);
+      const angles = [];
+      for (const axis of [propertyAxis, propertyAxis + 90]) {
+        addUniqueAngle(angles, aduRotationForAxis(axis, widthM, depthM));
+      }
+      return angles;
     }
 
     function buildableBounds() {
@@ -1555,13 +2015,10 @@
       aduState.widthM = widthFt * FT_TO_M;
       aduState.depthM = depthFt * FT_TO_M;
       const bounds = buildableBounds();
-      const angles = [
-        Number(siteModel?.adu?.suggested_rotation_deg || 0),
-        Number(siteModel?.adu?.suggested_rotation_deg || 0) + 90,
-        0,
-        90,
-      ];
-      let best = null;
+      const angles = candidateAduRotations(aduState.widthM, aduState.depthM);
+      const preferredAngle = angles[0]; // dominant parcel-axis rotation — always prefer this
+      let preferred = null;
+      let fallback = null;
       if (bounds) {
         const step = Math.max(1.2, Math.min(widthFt, depthFt) * FT_TO_M / 3);
         for (const angle of angles) {
@@ -1569,20 +2026,25 @@
             for (let y = bounds.minY; y <= bounds.maxY; y += step) {
               if (!isAduValid(x, y, angle)) continue;
               const score = -Math.hypot(x, y);
-              if (!best || score > best.score) best = { center_local: [x, y], rotation_deg: angle, score };
+              if (angle === preferredAngle) {
+                if (!preferred || score > preferred.score) preferred = { center_local: [x, y], rotation_deg: angle, score };
+              } else {
+                if (!fallback || score > fallback.score) fallback = { center_local: [x, y], rotation_deg: angle, score };
+              }
             }
           }
         }
       }
       aduState.widthM = oldW;
       aduState.depthM = oldD;
-      return best;
+      return preferred || fallback;
     }
 
     function chooseInitialAdu() {
       if (!siteModel) return null;
       const buildableArea = Number(siteModel._buildableArea_ft2 ?? siteModel.buildable_zone?.area_ft2 ?? 0);
-      const targetArea = Math.max(80, Math.min(maxDetachedAduAreaFt2(), buildableArea || maxDetachedAduAreaFt2()));
+      const maxArea = maxCurrentAduAreaFt2();
+      const targetArea = Math.max(80, Math.min(maxArea, buildableArea || maxArea));
       const aspect = 24 / 32; // width:depth, close to the app's original 18x24 proportion.
       const candidates = [];
       for (let area = targetArea; area >= 120; area *= 0.90) {
@@ -2823,18 +3285,16 @@
     }
 
     function showTab(name) {
-      const showModel = name === 'model';
+      const showModel  = name === 'model';
       const showReal3d = name === 'real3d';
-      const showFinancing = name === 'financing';
-      const showChecklist = !showModel && !showReal3d && !showFinancing;
-      els.checklistPanel.hidden = !showChecklist;
-      els.modelPanel.hidden = !showModel;
+      // Financing and checklist panels are now wizard steps, not tabs in stepModel.
+      els.checklistPanel.hidden = true;
+      els.modelPanel.hidden  = !showModel;
       els.real3dPanel.hidden = !showReal3d;
-      els.financingPanel.hidden = !showFinancing;
-      els.checklistTab.classList.toggle('active', showChecklist);
       els.modelTab.classList.toggle('active', showModel);
       els.real3dTab.classList.toggle('active', showReal3d);
-      els.financingTab.classList.toggle('active', showFinancing);
+      els.checklistTab.classList.toggle('active', false);
+      els.financingTab.classList.toggle('active', false);
       if (showModel) {
         requestAnimationFrame(() => {
           resize();
@@ -2980,7 +3440,7 @@
       }
     }
 
-    els.financingTab.addEventListener('click', () => showTab('financing'));
+    els.financingTab?.addEventListener('click', () => navigateWizard(6));
 
     els.form.addEventListener('submit', e => {
       e.preventDefault();
@@ -3006,6 +3466,7 @@
       }
       els.address.value = v;
       dismissLandingOverlay();
+      navigateWizard(1);
       loadSite();
     }
 
@@ -3016,7 +3477,6 @@
         startFromLanding();
       }
     });
-    els.checklistTab.addEventListener('click', () => showTab('checklist'));
     els.modelTab.addEventListener('click', () => showTab('model'));
     els.real3dTab.addEventListener('click', () => showTab('real3d'));
     els.loadReal3dBtn.addEventListener('click', ensureReal3dLoaded);
@@ -3112,6 +3572,157 @@
     els.height.addEventListener('input', () => {
       aduState.heightM = Number(els.height.value) * FT_TO_M;
       rebuildAdu();
+      renderSidebarLimits(aduTypeVal);
+      _markReqsStale();
+    });
+
+    // ── Floors toggle ─────────────────────────────────────────────────────────
+    let currentFloors = 1;
+
+    function _maxHeightForType(type, floors) {
+      // Use backend constraints when stories match the cached fetch
+      const c = backendConstraintsFor(type, floors);
+      if (c?.max_height_ft != null) return c.max_height_ft;
+      if (standardsVal === 'state') {
+        if (type === 'attached') return 25;
+        if (type === 'jadu') return 25;
+        return 18;
+      }
+      // Fallback: city-standard approximation
+      if (type === 'attached') return 25;
+      if (type === 'jadu')     return 25;
+      return floors === 2 ? 25 : 18;
+    }
+
+    function _updateHeightSlider(type, floors) {
+      const slider = els.sidebarHeight;
+      const mainSlider = els.height;
+      const hint = document.getElementById('sidebarHeightHint');
+      if (!slider) return;
+      const max = _maxHeightForType(type, floors);
+      slider.max = String(max);
+      if (mainSlider) mainSlider.max = String(max);
+      // Clamp current value
+      const cur = Number(slider.value);
+      if (cur > max) {
+        slider.value = String(max);
+        if (mainSlider) mainSlider.value = String(max);
+        if (els.sidebarHeightLabel) els.sidebarHeightLabel.textContent = String(max);
+        if (els.sidebarHeightVal)   els.sidebarHeightVal.textContent   = max + ' ft';
+        aduState.heightM = max * FT_TO_M;
+        rebuildAdu();
+      }
+      if (hint) {
+        const label = floors === 1 ? '1-story max' : '2-story max';
+        hint.textContent = `${label}: ${max} ft`;
+      }
+    }
+
+    document.getElementById('floorsToggle')?.querySelectorAll('.seg-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.getElementById('floorsToggle').querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentFloors = Number(btn.dataset.floors);
+        _updateHeightSlider(aduTypeVal, currentFloors);
+        renderSidebarLimits(aduTypeVal);
+        _refreshConstraints();
+      });
+    });
+
+    // Background re-fetch: updates siteModel + renders limits/picker WITHOUT navigating.
+    // Used by the standards toggle and floors toggle so they don't hijack the wizard step.
+    async function _refreshConstraints() {
+      if (!siteModel || !els.address.value.trim()) return;
+      const w = Number(els.sidebarWidth?.value || els.aduWidth.value) || 30;
+      const d = Number(els.sidebarDepth?.value || els.aduDepth.value) || 40;
+      const h = currentAduHeightFt();
+      try {
+        const data = await postJson('/api/site', {
+          city: getSelectedCity(),
+          address: els.address.value.trim(),
+          include_checklist: true,
+          standards: standardsVal,
+          adu_type: aduTypeVal,
+          adu_stories: currentFloors,
+          adu_width_ft: w,
+          adu_depth_ft: d,
+          adu_height_ft: h,
+          front_edge_index: selectedFrontEdgeIdx,
+        });
+        if (data.site_model) siteModel = data.site_model;
+        if (data.property_stats) propertyStats = data.property_stats;
+        const items = data.checklist?.items || [];
+        _allChecklistItems = items;
+        _checklistDims = { w, d, h, floors: currentFloors, type: aduTypeVal, standards: standardsVal };
+        _updateHeightSlider(aduTypeVal, currentFloors);
+        // Rebuild the 3D scene so the buildable zone reflects the new setbacks
+        // while preserving the dimensions used for this rules fetch.
+        buildScene({ preserveDimensions: true });
+        renderSidebarLimits(aduTypeVal);
+        renderSidebarSizeStat();
+        renderAduPicker(data.property_stats);
+        renderSizeCard(aduTypeVal, data.property_stats);
+        // Refresh checklist if that step is currently visible
+        const checklistStep = document.getElementById('stepChecklist');
+        if (checklistStep && !checklistStep.hidden) renderFullChecklist(_allChecklistItems);
+      } catch (err) {
+        _markReqsStale();
+        setStatus(err.message || 'Rules refresh failed — requirements may be stale.', 'err');
+      }
+    }
+
+    function applyStandards(val) {
+      standardsVal = val;
+      document.querySelectorAll('[data-standards]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.standards === val);
+      });
+      applyAduType(aduTypeVal);
+      const hint = document.getElementById('standardsHintStep2');
+      if (hint) {
+        hint.textContent = val === 'city'
+          ? 'City standards: up to 1,000–1,200 sf depending on lot size'
+          : 'State standards: max 800 sf, 4 ft side/rear setbacks, no siting restriction';
+      }
+      _refreshConstraints();
+    }
+    document.querySelectorAll('[data-standards]').forEach(btn => {
+      btn.addEventListener('click', () => applyStandards(btn.dataset.standards));
+    });
+
+    // Sidebar dimension inputs — sync to the existing hidden step-3 inputs so all
+    // existing handlers (updateAduSizeFromInputs, rebuildAdu, etc.) continue to fire.
+    function _markReqsStale() {
+      const btn = document.getElementById('refreshReqBtn');
+      if (btn) btn.hidden = false;
+    }
+    els.sidebarWidth?.addEventListener('input', e => {
+      els.aduWidth.value = e.target.value;
+      updateAduSizeFromInputs();
+      renderSidebarSizeStat();
+      renderSidebarLimits(aduTypeVal);
+      _markReqsStale();
+    });
+    els.sidebarDepth?.addEventListener('input', e => {
+      els.aduDepth.value = e.target.value;
+      updateAduSizeFromInputs();
+      renderSidebarSizeStat();
+      renderSidebarLimits(aduTypeVal);
+      _markReqsStale();
+    });
+    els.sidebarHeight?.addEventListener('input', e => {
+      const v = e.target.value;
+      els.height.value = v;
+      if (els.sidebarHeightLabel) els.sidebarHeightLabel.textContent = v;
+      if (els.sidebarHeightVal)   els.sidebarHeightVal.textContent   = v + ' ft';
+      if (els.heightLabel)        els.heightLabel.textContent        = v;
+      if (els.heightVal)          els.heightVal.textContent          = v + ' ft';
+      aduState.heightM = Number(v) * FT_TO_M;
+      rebuildAdu();
+      renderSidebarLimits(aduTypeVal);
+      _markReqsStale();
+    });
+    document.getElementById('refreshReqBtn')?.addEventListener('click', () => {
+      if (aduTypeVal && siteModel) selectAduType(aduTypeVal);
     });
     els.houseRot.addEventListener('input', () => {
       houseState.rot = Number(els.houseRot.value);
@@ -3180,15 +3791,19 @@
     // ── ADU type selector ───────────────────────────────────────────────────
     const ADU_TYPE_HINTS = {
       detached: 'Standalone structure in the rear yard. Must be behind the main home or \u226545\u00a0ft from the front property line. Front-yard placement not allowed.',
-      attached: 'Shares a wall with the primary home. NO siting restriction \u2014 can be in the front yard. Front door must be on a different facade. Max size = 50% of primary home area.',
-      jadu: 'Junior ADU within the existing primary footprint (incl. attached garage). Max 500\u00a0sf. Owner-occupancy required unless it has its own bathroom/kitchen.',
+      attached: 'Shares a wall with the primary home. No additional siting restriction beyond applicable setbacks; front door must be on a different facade.',
+      jadu: 'Junior ADU within the existing primary footprint (incl. attached garage). Max 500\u00a0sf. Owner-occupancy required unless it has independent sanitation facilities.',
     };
     function applyAduType(val) {
       aduTypeVal = val;
       els.aduTypeSeg.querySelectorAll('.seg-btn').forEach(b => {
         b.classList.toggle('active', b.dataset.val === val);
       });
-      els.aduTypeHint.textContent = ADU_TYPE_HINTS[val] || '';
+      els.aduTypeHint.textContent = (
+        val === 'detached' && standardsVal === 'state'
+          ? 'Standalone structure. State Standards allow no local siting restriction; side/rear setbacks are 4 ft and front setback follows the zoning district unless the 800 sf exception applies.'
+          : ADU_TYPE_HINTS[val] || ''
+      );
       // JADU max size cap
       if (val === 'jadu') {
         els.aduWidth.max = '22';
@@ -3215,6 +3830,10 @@
     els.aduTypeCards?.addEventListener('click', (e) => {
       const card = e.target.closest('.adu-card[data-type]');
       if (!card || !siteModel) return;
+      // Update aria-checked on all cards
+      els.aduTypeCards.querySelectorAll('.adu-card[role="radio"]').forEach(c => {
+        c.setAttribute('aria-checked', c === card ? 'true' : 'false');
+      });
       selectAduType(card.dataset.type);
     });
 
@@ -3253,9 +3872,21 @@
     document.getElementById('landingAddress')?.focus();
 
     // ── Wizard navigation ────────────────────────────────────────────────────
-    const WIZARD_STEP_IDS = ['stepCompliance', 'stepAduType', 'stepConfigure', 'stepModel'];
+    const WIZARD_STEP_IDS = ['stepCompliance', 'stepAduType', 'stepConfigure', 'stepModel', 'stepChecklist', 'stepFinancing'];
+
+    const _CHECK_SVG = `<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2 6 5 9 10 3"/></svg>`;
+    // Visual step labels — sd3/configure skipped; sd4=model (3), sd5=checklist (4), sd6=financing (5)
+    const _VISUAL_STEP_NUM = { 1: '1', 2: '2', 4: '3', 5: '4', 6: '5' };
 
     function navigateWizard(step) {
+      // Determine direction for enter animation before hiding steps
+      const prevIdx = WIZARD_STEP_IDS.findIndex(id => {
+        const el = document.getElementById(id);
+        return el && !el.hidden;
+      });
+      const goingForward = prevIdx < 0 || step > prevIdx + 1;
+      const enterClass = goingForward ? 'is-enter-forward' : 'is-enter-backward';
+
       WIZARD_STEP_IDS.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.hidden = true;
@@ -3263,28 +3894,57 @@
       const targetId = WIZARD_STEP_IDS[step - 1];
       if (targetId) {
         const el = document.getElementById(targetId);
-        if (el) { el.hidden = false; window.scrollTo(0, 0); }
+        if (el) {
+          el.hidden = false;
+          // Model step (4) has its own stepFade animation — skip directional class
+          if (step !== 4) {
+            el.classList.remove('is-enter-forward', 'is-enter-backward');
+            el.classList.add(enterClass);
+            el.addEventListener('animationend', () => el.classList.remove(enterClass), { once: true });
+          }
+          window.scrollTo(0, 0);
+        }
       }
       // Show step indicator
       const indicator = document.getElementById('stepIndicator');
       if (indicator) indicator.hidden = false;
-      // Update dots
-      for (let i = 1; i <= 4; i++) {
+      // Update dots and parent step-item classes
+      for (let i = 1; i <= 6; i++) {
         const dot  = document.getElementById('sd' + i);
-        const line = document.getElementById('sl' + (i));
-        if (dot)  { dot.classList.toggle('active', i === step); dot.classList.toggle('done', i < step); }
-        if (line) { line.classList.toggle('done', i < step); }
+        const line = document.getElementById('sl' + i);
+        if (dot) {
+          const isDone   = i < step;
+          const isActive = i === step;
+          dot.classList.toggle('active', isActive);
+          dot.classList.toggle('done', isDone);
+          dot.innerHTML = isDone ? _CHECK_SVG : (_VISUAL_STEP_NUM[i] ?? String(i));
+          const item = dot.closest('.step-item');
+          if (item) {
+            item.classList.toggle('active', isActive);
+            item.classList.toggle('done', isDone);
+          }
+        }
+        if (line) line.classList.toggle('done', i < step);
       }
-      // Back button: show on steps 2, 3, 4
+      // Back button: show on steps 2+
       const backBtn = document.getElementById('headerBackBtn');
       if (backBtn) backBtn.classList.toggle('visible', step > 1);
       // Model step: go to model tab
-      if (step === 4) {
-        showTab('model');
+      if (step === 4) showTab('model');
+      // Financing step: ensure panel is visible and data is fresh
+      if (step === 6) {
+        const fp = document.getElementById('financingPanel');
+        if (fp) fp.hidden = false;
+        renderFinancing();
       }
     }
 
     // ── Wizard button wiring ─────────────────────────────────────────────────
+
+    // Front edge picker skip
+    document.getElementById('frontEdgeSkipBtn')?.addEventListener('click', () => {
+      document.getElementById('frontEdgePicker').hidden = true;
+    });
 
     // Continue → Step 2 (ADU type)
     document.getElementById('continueToAduBtn')?.addEventListener('click', () => {
@@ -3296,13 +3956,97 @@
       navigateWizard(4);
     });
 
-    // Header back button
+    // Full Compliance Review → Step 5 (checklist), auto-refresh if dims changed
+    document.getElementById('continueToChecklistBtn')?.addEventListener('click', async () => {
+      const typeLabels = { detached: 'Detached ADU', attached: 'Attached ADU', jadu: 'JADU' };
+      const titleEl = document.getElementById('checklistStepTitle');
+      if (titleEl) titleEl.textContent = `${typeLabels[aduTypeVal] || 'ADU'} Compliance Checklist`;
+
+      const curW = Number(els.sidebarWidth?.value || els.aduWidth.value) || 30;
+      const curD = Number(els.sidebarDepth?.value || els.aduDepth.value) || 40;
+      const curH = currentAduHeightFt();
+      const dimsChanged = (
+        curW !== _checklistDims.w ||
+        curD !== _checklistDims.d ||
+        curH !== _checklistDims.h ||
+        currentFloors !== _checklistDims.floors ||
+        aduTypeVal !== _checklistDims.type ||
+        standardsVal !== _checklistDims.standards
+      );
+
+      if (dimsChanged && els.address.value.trim()) {
+        // Navigate first so the loading state is visible
+        const container = document.getElementById('fullChecklist');
+        const tabBar = document.getElementById('checklistTabBar');
+        if (container) container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-soft);font-size:13px;">Recalculating for new dimensions…</div>';
+        if (tabBar) tabBar.innerHTML = '';
+        document.getElementById('fullChecklistSummary')?.setAttribute('hidden', '');
+        navigateWizard(5);
+        try {
+          const data = await postJson('/api/site', {
+            city: getSelectedCity(),
+            address: els.address.value.trim(),
+            include_checklist: true,
+            standards: standardsVal,
+            adu_type: aduTypeVal,
+            adu_stories: currentFloors,
+            adu_width_ft: curW,
+            adu_depth_ft: curD,
+            adu_height_ft: curH,
+            front_edge_index: selectedFrontEdgeIdx,
+          });
+          _allChecklistItems = data.checklist?.items || [];
+          _checklistDims = {
+            w: curW,
+            d: curD,
+            h: curH,
+            floors: currentFloors,
+            type: aduTypeVal,
+            standards: standardsVal,
+          };
+          if (data.site_model) {
+            siteModel = data.site_model;
+            propertyStats = data.property_stats || propertyStats;
+            zipContext = data.zip_context || zipContext;
+            financing = data.financing || financing;
+            _updateHeightSlider(aduTypeVal, currentFloors);
+            buildScene({ preserveDimensions: true });
+            renderSidebarLimits(aduTypeVal);
+            renderSidebarSizeStat();
+            renderSizeCard(aduTypeVal, propertyStats);
+          }
+        } catch (err) {
+          _allChecklistItems = [{
+            part: 0,
+            number: null,
+            status: 'unavailable',
+            question: 'Checklist refresh failed',
+            detail: err.message || 'Could not recalculate requirements for the current ADU inputs.',
+            source: 'POST /api/site',
+          }];
+          setStatus('Checklist refresh failed — current requirements are unavailable.', 'err');
+        }
+      } else {
+        navigateWizard(5);
+      }
+      renderFullChecklist(_allChecklistItems);
+    });
+
+    // View Rental Estimate → Step 6 (financing)
+    document.getElementById('continueToFinancingBtn')?.addEventListener('click', () => {
+      navigateWizard(6);
+    });
+
+    // Header back button — skip configure (step 3) going back from model (4); checklist (5) → model (4)
     document.getElementById('headerBackBtn')?.addEventListener('click', () => {
       const currentStep = WIZARD_STEP_IDS.findIndex(id => {
         const el = document.getElementById(id);
         return el && !el.hidden;
       }) + 1;
-      if (currentStep > 1) navigateWizard(currentStep - 1);
+      if (currentStep > 1) {
+        const prevStep = currentStep === 4 ? 2 : currentStep - 1;
+        navigateWizard(prevStep);
+      }
     });
 
     // Change address → return to landing
@@ -3313,6 +4057,30 @@
       document.getElementById('stepIndicator').hidden = true;
       document.getElementById('headerBackBtn')?.classList.remove('visible');
       document.getElementById('address')?.focus();
+    });
+
+    // Home button (brand logo) — returns to the landing page from any wizard step
+    document.getElementById('homeBtn')?.addEventListener('click', () => {
+      const overlay = document.getElementById('landingOverlay');
+      if (!overlay) return;
+      if (!overlay.classList.contains('is-dismissed')) {
+        // Already on landing — focus the search input
+        document.getElementById('address')?.focus();
+        return;
+      }
+      overlay.classList.remove('is-dismissed');
+      overlay.removeAttribute('aria-hidden');
+      overlay.classList.add('is-showing');
+      overlay.addEventListener('animationend', () => overlay.classList.remove('is-showing'), { once: true });
+      WIZARD_STEP_IDS.forEach(id => { const el = document.getElementById(id); if (el) el.hidden = true; });
+      document.getElementById('stepIndicator').hidden = true;
+      document.getElementById('headerBackBtn')?.classList.remove('visible');
+      document.getElementById('address')?.focus();
+    });
+
+    // Sidebar collapse toggle
+    document.getElementById('sidebarCollapseBtn')?.addEventListener('click', () => {
+      document.querySelector('.viewer-sidebar')?.classList.toggle('is-collapsed');
     });
 
     // Height slider → live label update
@@ -3338,5 +4106,3 @@
     });
 
     readUrlState();
-
-

@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Casita — ADU Planning for San Jose</title>
+  <title>Casita — ADU Compliance Planning</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230D9488'/><path d='M4 13.5L16 5l12 8.5V28a1 1 0 01-1 1H5a1 1 0 01-1-1V13.5z' stroke='white' stroke-width='2' fill='none' stroke-linejoin='round'/><path d='M12 29V21h8v8' stroke='white' stroke-width='2' fill='none' stroke-linejoin='round'/></svg>" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;1,14..32,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;0,14..32,800;1,14..32,400&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/app.css">
   <script type="importmap">
     {
@@ -25,12 +25,12 @@
 <body>
   <!-- ── App header ──────────────────────────────────────────────────────── -->
   <header class="app-header" role="banner">
-    <div class="brand-lockup">
+    <button class="brand-lockup" id="homeBtn" type="button" aria-label="Return to home">
       <div class="brand-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24"><path d="M3 9.5L12 3l9 6.5V20a1 1 0 01-1 1H4a1 1 0 01-1-1V9.5z"/><path d="M9 21V12h6v9"/></svg>
       </div>
       <span class="brand-name">Casita</span>
-    </div>
+    </button>
 
     <div class="step-indicator" id="stepIndicator" hidden aria-label="Progress">
       <div class="step-item">
@@ -44,13 +44,18 @@
       </div>
       <div class="step-line" id="sl2"></div>
       <div class="step-item">
-        <div class="step-dot" id="sd3">3</div>
-        <div class="step-label">Configure</div>
-      </div>
-      <div class="step-line" id="sl3"></div>
-      <div class="step-item">
-        <div class="step-dot" id="sd4">4</div>
+        <div class="step-dot" id="sd4">3</div>
         <div class="step-label">Model</div>
+      </div>
+      <div class="step-line" id="sl4"></div>
+      <div class="step-item">
+        <div class="step-dot" id="sd5">4</div>
+        <div class="step-label">Checklist</div>
+      </div>
+      <div class="step-line" id="sl5"></div>
+      <div class="step-item">
+        <div class="step-dot" id="sd6">5</div>
+        <div class="step-label">Financing</div>
       </div>
     </div>
 
@@ -65,25 +70,237 @@
 
   <!-- ── Landing (Step 0) ─────────────────────────────────────────────── -->
   <div id="landingOverlay" class="landing-page" role="dialog" aria-modal="true" aria-labelledby="landingTitle">
-    <div class="landing-content">
-      <div class="landing-eyebrow">San Jose ADU Analysis</div>
-      <h1 class="landing-title" id="landingTitle">Plan your<br>perfect casita</h1>
-      <p class="landing-sub">Instant GIS-backed compliance checks and 3D ADU planning for San Jose properties.</p>
-      <form id="siteForm" class="landing-form">
-        <input id="address" type="text" class="landing-input" placeholder="Enter your property address…" autocomplete="street-address" aria-label="Property address">
-        <button id="loadBtn" type="submit" class="landing-btn">
-          Analyze Property
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-        </button>
-      </form>
-      <div class="landing-trust">
-        <span>GIS-backed data</span>
-        <div class="landing-trust-dot"></div>
-        <span>San Jose ArcGIS layers</span>
-        <div class="landing-trust-dot"></div>
-        <span>Real-time compliance</span>
+
+    <!-- Screen 1: Hero / audience selector -->
+    <div class="landing-screen ls-active" id="lsHero">
+      <div class="landing-content">
+        <div class="landing-logo-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M3 9.5L12 3l9 6.5V20a1 1 0 01-1 1H4a1 1 0 01-1-1V9.5z"/><path d="M9 21V12h6v9"/></svg>
+        </div>
+        <div class="landing-eyebrow">ADU Planning Platform</div>
+        <h1 class="landing-title" id="landingTitle">Casita</h1>
+        <p class="landing-sub">GIS-backed ADU compliance and 3D planning for California properties.</p>
+        <div class="audience-toggle" role="group" aria-label="Choose your role">
+          <button id="btnHomeowners" class="audience-btn" type="button">
+            <div class="audience-btn-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5L12 3l9 6.5V20a1 1 0 01-1 1H4a1 1 0 01-1-1V9.5z"/><path d="M9 21V13h6v8"/></svg>
+            </div>
+            <div class="audience-btn-text">
+              <span class="audience-btn-label">For Homeowners</span>
+              <span class="audience-btn-desc">Plan and check your ADU</span>
+            </div>
+            <svg class="audience-btn-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          </button>
+          <button id="btnContractors" class="audience-btn audience-btn-muted" type="button" aria-describedby="contractorDesc">
+            <div class="audience-btn-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>
+            </div>
+            <div class="audience-btn-text">
+              <span class="audience-btn-label">For Contractors</span>
+              <span class="audience-btn-desc" id="contractorDesc">Batch analysis &amp; reporting</span>
+            </div>
+            <span class="audience-btn-badge" aria-label="Coming soon">Soon</span>
+          </button>
+        </div>
+        <div class="landing-trust">
+          <span>GIS-backed data</span>
+          <div class="landing-trust-dot"></div>
+          <span>Per-city ArcGIS layers</span>
+          <div class="landing-trust-dot"></div>
+          <span>Real-time compliance</span>
+        </div>
       </div>
     </div>
+
+    <!-- Screen 2: City picker (Homeowners) -->
+    <div class="landing-screen" id="lsCity">
+      <div class="landing-content landing-content-wide">
+        <button class="landing-back" id="cityBackBtn" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+          Back
+        </button>
+        <div class="landing-eyebrow" style="margin-top:4px;">For Homeowners</div>
+        <h2 class="landing-title" style="font-size:clamp(26px,4vw,46px);margin-bottom:8px;">Choose your city</h2>
+        <p class="landing-sub" style="font-size:15px;margin-bottom:36px;">Instant GIS-backed compliance checks and 3D ADU planning for your property.</p>
+        <div class="city-grid" role="group" aria-label="Select a city">
+
+          <!-- San Jose -->
+          <button class="city-card" id="cityCardSJ" data-city="san_jose" type="button" aria-label="San Jose, available now">
+            <div class="city-card-art sj-art" aria-hidden="true">
+              <svg viewBox="0 0 280 148" xmlns="http://www.w3.org/2000/svg">
+                <path d="M0 105 Q35 78 70 90 Q105 68 140 82 Q175 65 210 78 Q245 65 280 80 L280 148 L0 148Z" fill="rgba(255,255,255,0.07)"/>
+                <rect x="18" y="104" width="18" height="44" rx="1" fill="rgba(255,255,255,0.18)"/>
+                <rect x="42" y="90" width="22" height="58" rx="1" fill="rgba(255,255,255,0.22)"/>
+                <rect x="70" y="96" width="16" height="52" rx="1" fill="rgba(255,255,255,0.17)"/>
+                <rect x="92" y="78" width="26" height="70" rx="1" fill="rgba(255,255,255,0.26)"/>
+                <rect x="126" y="86" width="20" height="62" rx="1" fill="rgba(255,255,255,0.20)"/>
+                <rect x="154" y="70" width="30" height="78" rx="2" fill="rgba(255,255,255,0.28)"/>
+                <rect x="192" y="56" width="20" height="92" rx="1" fill="rgba(255,255,255,0.30)"/>
+                <rect x="195" y="46" width="14" height="14" rx="1" fill="rgba(255,255,255,0.22)"/>
+                <rect x="220" y="82" width="18" height="66" rx="1" fill="rgba(255,255,255,0.20)"/>
+                <rect x="246" y="92" width="16" height="56" rx="1" fill="rgba(255,255,255,0.17)"/>
+                <rect x="97" y="84" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.42)"/>
+                <rect x="105" y="84" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.42)"/>
+                <rect x="113" y="84" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.42)"/>
+                <rect x="97" y="92" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.32)"/>
+                <rect x="105" y="92" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.32)"/>
+                <rect x="113" y="92" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.32)"/>
+                <rect x="160" y="76" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.35)"/>
+                <rect x="170" y="76" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.35)"/>
+                <rect x="160" y="84" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.28)"/>
+                <rect x="170" y="84" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.28)"/>
+              </svg>
+            </div>
+            <div class="city-card-overlay"></div>
+            <div class="city-card-body">
+              <div class="city-card-name">San Jose</div>
+              <div class="city-card-avail city-card-avail-live">
+                <span class="city-avail-dot"></span>Available now
+              </div>
+            </div>
+            <div class="city-card-arrow" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </div>
+          </button>
+
+          <!-- San Francisco -->
+          <button class="city-card city-card-soon" id="cityCardSF" data-city="sf" type="button" aria-label="San Francisco, coming soon" disabled>
+            <div class="city-card-art sf-art" aria-hidden="true">
+              <svg viewBox="0 0 280 148" xmlns="http://www.w3.org/2000/svg">
+                <path d="M0 72 Q40 52 80 64 Q120 44 160 60 Q200 46 240 56 Q265 50 280 54 L280 96 L0 96Z" fill="rgba(255,255,255,0.05)"/>
+                <path d="M0 120 Q70 113 140 120 Q210 113 280 120 L280 148 L0 148Z" fill="rgba(255,255,255,0.08)"/>
+                <rect x="14" y="104" width="252" height="7" rx="1.5" fill="rgba(255,255,255,0.28)"/>
+                <rect x="14" y="111" width="252" height="3" rx="1" fill="rgba(255,255,255,0.13)"/>
+                <rect x="68" y="36" width="14" height="75" rx="1" fill="rgba(255,255,255,0.38)"/>
+                <rect x="65" y="30" width="20" height="9" rx="1" fill="rgba(255,255,255,0.50)"/>
+                <rect x="69" y="72" width="12" height="5" rx="0.5" fill="rgba(255,255,255,0.28)"/>
+                <rect x="198" y="36" width="14" height="75" rx="1" fill="rgba(255,255,255,0.38)"/>
+                <rect x="195" y="30" width="20" height="9" rx="1" fill="rgba(255,255,255,0.50)"/>
+                <rect x="199" y="72" width="12" height="5" rx="0.5" fill="rgba(255,255,255,0.28)"/>
+                <path d="M75 38 Q44 78 14 111" stroke="rgba(255,255,255,0.22)" fill="none" stroke-width="1.5"/>
+                <path d="M75 38 Q140 74 205 38" stroke="rgba(255,255,255,0.22)" fill="none" stroke-width="1.5"/>
+                <path d="M205 38 Q236 78 266 111" stroke="rgba(255,255,255,0.22)" fill="none" stroke-width="1.5"/>
+                <line x1="36" y1="76" x2="36" y2="111" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+                <line x1="54" y1="64" x2="54" y2="111" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+                <line x1="104" y1="60" x2="104" y2="111" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+                <line x1="130" y1="56" x2="130" y2="111" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+                <line x1="150" y1="56" x2="150" y2="111" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+                <line x1="176" y1="60" x2="176" y2="111" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+                <line x1="226" y1="64" x2="226" y2="111" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+                <line x1="244" y1="76" x2="244" y2="111" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+              </svg>
+            </div>
+            <div class="city-card-overlay"></div>
+            <div class="city-card-body">
+              <div class="city-card-name">San Francisco</div>
+              <div class="city-card-avail">Coming soon</div>
+            </div>
+            <div class="city-card-soon-tag" aria-hidden="true">Soon</div>
+          </button>
+
+          <!-- Oakland -->
+          <button class="city-card city-card-soon" id="cityCardOak" data-city="oakland" type="button" aria-label="Oakland, coming soon" disabled>
+            <div class="city-card-art oak-art" aria-hidden="true">
+              <svg viewBox="0 0 280 148" xmlns="http://www.w3.org/2000/svg">
+                <path d="M0 114 Q70 107 140 114 Q210 107 280 114 L280 148 L0 148Z" fill="rgba(255,255,255,0.08)"/>
+                <rect x="168" y="80" width="14" height="68" rx="1" fill="rgba(255,255,255,0.22)"/>
+                <rect x="188" y="70" width="18" height="78" rx="1" fill="rgba(255,255,255,0.26)"/>
+                <rect x="212" y="54" width="22" height="94" rx="2" fill="rgba(255,255,255,0.30)"/>
+                <rect x="240" y="72" width="16" height="76" rx="1" fill="rgba(255,255,255,0.20)"/>
+                <rect x="262" y="86" width="18" height="62" rx="1" fill="rgba(255,255,255,0.17)"/>
+                <rect x="216" y="60" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.42)"/>
+                <rect x="226" y="60" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.42)"/>
+                <rect x="216" y="68" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.32)"/>
+                <rect x="226" y="68" width="4" height="3" rx="0.5" fill="rgba(255,255,255,0.32)"/>
+                <rect x="0" y="100" width="170" height="7" rx="1" fill="rgba(255,255,255,0.28)"/>
+                <rect x="0" y="107" width="170" height="3.5" rx="1" fill="rgba(255,255,255,0.13)"/>
+                <rect x="50" y="48" width="14" height="59" rx="1" fill="rgba(255,255,255,0.38)"/>
+                <rect x="47" y="42" width="20" height="8" rx="1" fill="rgba(255,255,255,0.48)"/>
+                <rect x="51" y="68" width="12" height="4" rx="0.5" fill="rgba(255,255,255,0.28)"/>
+                <rect x="126" y="48" width="14" height="59" rx="1" fill="rgba(255,255,255,0.38)"/>
+                <rect x="123" y="42" width="20" height="8" rx="1" fill="rgba(255,255,255,0.48)"/>
+                <rect x="127" y="68" width="12" height="4" rx="0.5" fill="rgba(255,255,255,0.28)"/>
+                <path d="M57 50 Q28 76 2 107" stroke="rgba(255,255,255,0.22)" fill="none" stroke-width="1.5"/>
+                <path d="M57 50 Q92 76 133 50" stroke="rgba(255,255,255,0.22)" fill="none" stroke-width="1.5"/>
+                <path d="M133 50 Q152 76 170 107" stroke="rgba(255,255,255,0.22)" fill="none" stroke-width="1.5"/>
+                <line x1="22" y1="72" x2="22" y2="107" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+                <line x1="38" y1="64" x2="38" y2="107" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+                <line x1="82" y1="62" x2="82" y2="107" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+                <line x1="106" y1="64" x2="106" y2="107" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+                <line x1="152" y1="66" x2="152" y2="107" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+              </svg>
+            </div>
+            <div class="city-card-overlay"></div>
+            <div class="city-card-body">
+              <div class="city-card-name">Oakland</div>
+              <div class="city-card-avail">Coming soon</div>
+            </div>
+            <div class="city-card-soon-tag" aria-hidden="true">Soon</div>
+          </button>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- Screen 3: Address entry (after city selected) -->
+    <div class="landing-screen" id="lsAddress">
+      <div class="landing-content">
+        <button class="landing-back" id="addressBackBtn" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+          Back
+        </button>
+        <div id="selectedCityDisplay" class="landing-city-badge">San Jose</div>
+        <h2 class="landing-title" style="font-size:clamp(30px,5vw,52px);">Plan your<br>perfect casita</h2>
+        <p class="landing-sub">Enter your property address for instant GIS-backed compliance and 3D ADU planning.</p>
+        <form id="siteForm" class="landing-form">
+          <select id="citySelect" hidden aria-hidden="true">
+            <option value="san_jose">San Jose</option>
+            <option value="sf">San Francisco</option>
+            <option value="oakland">Oakland</option>
+          </select>
+          <input id="address" type="text" class="landing-input" placeholder="e.g. 123 El Camino Real" autocomplete="street-address" aria-label="Property address">
+          <button id="loadBtn" type="submit" class="landing-btn">
+            Analyze Property
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          </button>
+        </form>
+        <div class="landing-trust">
+          <span>GIS-backed data</span>
+          <div class="landing-trust-dot"></div>
+          <span>Per-city ArcGIS layers</span>
+          <div class="landing-trust-dot"></div>
+          <span>Real-time compliance</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Screen 4: Contractors (coming soon) -->
+    <div class="landing-screen" id="lsContractors">
+      <div class="landing-content">
+        <button class="landing-back" id="contractorBackBtn" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+          Back
+        </button>
+        <div class="landing-eyebrow" style="margin-top:4px;">Coming Soon</div>
+        <h2 class="landing-title" style="font-size:clamp(30px,5vw,52px);">Casita for<br>Contractors</h2>
+        <p class="landing-sub">Powerful tools for ADU contractors — batch property analysis, permit tracking, and client reporting across multiple cities.</p>
+        <div class="contractor-features">
+          <div class="contractor-feature">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            <span>Batch property analysis across multiple parcels</span>
+          </div>
+          <div class="contractor-feature">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            <span>Permit tracking and project dashboard</span>
+          </div>
+          <div class="contractor-feature">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+            <span>Client reporting and shareable compliance reports</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- JS compat stubs -->
     <input id="landingAddress" type="text" hidden aria-hidden="true">
     <button id="landingStartBtn" type="button" hidden aria-hidden="true"></button>
@@ -125,17 +342,29 @@
           <span id="statusText">Enter an address to get started.</span>
         </div>
 
+        <div id="stageLog" class="stage-log" aria-live="polite" hidden></div>
+
+        <!-- Front property line picker — shown after parcel loads -->
+        <div id="frontEdgePicker" class="front-edge-picker" hidden>
+          <div class="front-edge-header">
+            <div>
+              <div class="front-edge-title">Which side of your parcel faces the street?</div>
+              <div class="front-edge-subtitle">Used to verify the 45 ft siting rule for detached ADUs</div>
+            </div>
+            <button id="frontEdgeSkipBtn" type="button" class="front-edge-skip">Skip</button>
+          </div>
+          <div class="front-edge-body">
+            <svg id="frontEdgeSvg" class="front-edge-svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" aria-label="Parcel map — tap an edge to select front property line"></svg>
+            <div id="frontEdgeMsg" class="front-edge-msg">Tap an edge to mark your front property line</div>
+          </div>
+        </div>
+
         <div id="dataWarningsBanner" hidden role="alert"></div>
+
+        <div id="checklistSummary" class="checklist-summary" hidden></div>
 
         <div id="phase1Section">
           <div id="phase1Checklist" class="checklist"></div>
-        </div>
-
-        <div id="stageListWrap" hidden style="margin-top:16px;">
-          <details>
-            <summary style="font-size:12px;color:var(--text-faint);cursor:pointer;user-select:none;">Pipeline details</summary>
-            <div id="stageList" class="stage-list" style="margin-top:8px;"></div>
-          </details>
         </div>
 
         <div id="complianceCta" class="step-cta" hidden>
@@ -158,8 +387,16 @@
           <h2 class="wizard-step-title">Choose Your ADU Type</h2>
           <p class="wizard-step-desc">Select the type that fits your property and goals. Each has different size limits and siting rules.</p>
         </div>
+        <div class="standards-toggle-row">
+          <span class="standards-toggle-label">Development Standards</span>
+          <div class="seg" id="standardsSegStep2" role="group" aria-label="Development standards">
+            <button type="button" class="seg-btn active" data-standards="city">City (§20.80.175)</button>
+            <button type="button" class="seg-btn" data-standards="state">State (§20.80.176)</button>
+          </div>
+          <span id="standardsHintStep2" class="standards-hint">City standards allow larger ADUs on bigger lots</span>
+        </div>
         <div id="aduPickerSection">
-          <div id="aduTypeCards" class="adu-type-grid"></div>
+          <div id="aduTypeCards" class="adu-type-grid" role="radiogroup" aria-label="ADU type"></div>
         </div>
       </div>
     </div>
@@ -223,10 +460,10 @@
     <div id="stepModel" class="wizard-step" hidden>
       <!-- Tab bar -->
       <nav class="model-tabs" aria-label="View tabs">
-        <button id="modelTab"     class="tab-btn active" type="button">3D Model</button>
-        <button id="real3dTab"    class="tab-btn"        type="button">Real 3D</button>
-        <button id="financingTab" class="tab-btn"        type="button">Financing</button>
-        <!-- compat: checklist tab (hidden) -->
+        <button id="modelTab"  class="tab-btn active" type="button">3D Model</button>
+        <button id="real3dTab" class="tab-btn"        type="button">Real 3D</button>
+        <!-- compat stubs — financing moved to step 6, checklist moved to step 5 -->
+        <button id="financingTab" class="tab-btn" type="button" hidden style="display:none"></button>
         <button id="checklistTab" class="tab-btn" type="button" hidden style="display:none"></button>
       </nav>
 
@@ -236,57 +473,131 @@
 
         <!-- Floating sidebar -->
         <div class="viewer-sidebar glass">
-          <div class="vsb-section">
-            <div class="vsb-label">ADU Placement</div>
-            <div>
-              <label for="rotation">Rotation</label>
-              <input id="rotation" type="range" min="-180" max="180" value="0">
-            </div>
-            <button id="snapBtn" type="button" class="btn-secondary" disabled>Auto-place ADU</button>
+          <div class="vsb-header">
+            <span class="vsb-title">ADU Design</span>
+            <button class="vsb-toggle-btn" id="sidebarCollapseBtn" type="button" aria-label="Collapse panel">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
           </div>
+          <div class="vsb-body">
 
-          <div class="vsb-section">
-            <div class="vsb-label">Floor</div>
-            <select id="floorMode">
-              <option value="satellite">Satellite imagery</option>
-              <option value="outline">Simple outline</option>
-            </select>
-          </div>
-
-          <div class="vsb-section">
-            <div class="vsb-label">House Alignment</div>
-            <p class="help-text" id="houseHelp">Use Edit Position to align the house with satellite imagery.</p>
-            <div class="btn-stack">
-              <button id="houseEditBtn"     type="button" class="btn-ghost">Align to satellite</button>
-              <button id="hideStructureBtn" type="button" class="btn-ghost">Hide buildings</button>
+          <!-- Dimensions -->
+          <div class="vsb-section" id="sidebarDimsSection">
+            <div class="vsb-label">Dimensions</div>
+            <div class="vsb-dims-row">
+              <div>
+                <label class="vsb-sub-label" for="sidebarWidth">Width (ft)</label>
+                <input id="sidebarWidth" type="number" value="30" min="8" max="40" step="1">
+              </div>
+              <div>
+                <label class="vsb-sub-label" for="sidebarDepth">Depth (ft)</label>
+                <input id="sidebarDepth" type="number" value="40" min="8" max="50" step="1">
+              </div>
             </div>
             <div>
-              <label for="houseRot">House rotation</label>
-              <input id="houseRot" type="range" min="-180" max="180" value="0" disabled>
+              <div class="vsb-floors-row">
+                <span class="vsb-sub-label">Floors</span>
+                <div class="seg seg-sm" id="floorsToggle" role="group" aria-label="Number of floors">
+                  <button type="button" class="seg-btn active" data-floors="1">1 floor</button>
+                  <button type="button" class="seg-btn" data-floors="2">2 floors</button>
+                </div>
+              </div>
+              <div class="vsb-floors-row" style="margin-top:8px;">
+                <span class="vsb-sub-label">Standards</span>
+                <div class="seg seg-sm" id="standardsSegSidebar" role="group" aria-label="Development standards">
+                  <button type="button" class="seg-btn active" data-standards="city">City</button>
+                  <button type="button" class="seg-btn" data-standards="state">State</button>
+                </div>
+              </div>
+              <label class="vsb-sub-label" style="margin-top:10px;">Height — <span id="sidebarHeightLabel">16</span> ft</label>
+              <div class="range-row">
+                <input id="sidebarHeight" type="range" min="10" max="18" value="16">
+                <span class="range-value" id="sidebarHeightVal">16 ft</span>
+              </div>
+              <div id="sidebarHeightHint" class="sidebar-height-hint">1-story max: 18 ft</div>
             </div>
-            <button id="houseResetBtn"  type="button" class="btn-ghost" disabled>Reset position</button>
-            <button id="showHousesBtn"  type="button" class="btn-ghost" disabled>Show hidden houses</button>
+            <div id="sidebarSizeStat" class="sidebar-size-stat" hidden></div>
           </div>
 
-          <div class="vsb-section">
-            <div class="vsb-label">Site Metrics</div>
-            <div id="metrics" class="metrics"></div>
+          <!-- Key Limits -->
+          <div class="vsb-section" id="sidebarLimitsSection" hidden>
+            <div class="vsb-label">Key Limits</div>
+            <div id="sidebarLimitsCard" class="sidebar-limits-card"></div>
           </div>
 
-          <div class="vsb-section">
+          <!-- Continue CTA -->
+          <div class="vsb-section vsb-cta-section" id="sidebarCtaSection" hidden>
+            <button id="continueToChecklistBtn" type="button" class="btn-primary vsb-cta-btn">
+              Full Compliance Review
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </button>
+          </div>
+
+          <!-- Advanced controls — collapsed by default -->
+          <div class="vsb-section vsb-section-advanced">
+            <details class="vsb-details">
+              <summary class="vsb-details-summary">Advanced</summary>
+              <div class="vsb-details-body">
+
+                <!-- Placement -->
+                <div class="vsb-sub-group">
+                  <div class="vsb-label">Placement</div>
+                  <label class="vsb-sub-label" for="rotation">Rotation</label>
+                  <input id="rotation" type="range" min="-180" max="180" value="0">
+                  <button id="snapBtn" type="button" class="btn-secondary" disabled>Auto-place ADU</button>
+                </div>
+
+                <!-- Floor -->
+                <div class="vsb-sub-group">
+                  <div class="vsb-label">Floor Style</div>
+                  <select id="floorMode">
+                    <option value="satellite">Satellite imagery</option>
+                    <option value="streets">Street map</option>
+                    <option value="outline">Simple outline</option>
+                  </select>
+                </div>
+
+                <!-- House Alignment -->
+                <details class="vsb-details">
+                  <summary class="vsb-details-summary">House Alignment</summary>
+                  <div class="vsb-details-body">
+                    <p class="help-text" id="houseHelp">Use Edit Position to align the house with satellite imagery.</p>
+                    <div class="btn-stack">
+                      <button id="houseEditBtn"     type="button" class="btn-ghost">Align to satellite</button>
+                      <button id="hideStructureBtn" type="button" class="btn-ghost">Hide buildings</button>
+                    </div>
+                    <div>
+                      <label for="houseRot">House rotation</label>
+                      <input id="houseRot" type="range" min="-180" max="180" value="0" disabled>
+                    </div>
+                    <button id="houseResetBtn"  type="button" class="btn-ghost" disabled>Reset position</button>
+                    <button id="showHousesBtn"  type="button" class="btn-ghost" disabled>Show hidden houses</button>
+                  </div>
+                </details>
+
+              </div>
+            </details>
+          </div>
+
+          <!-- Hidden compat stubs — JS still references these by ID -->
+          <div hidden aria-hidden="true" style="display:none">
+            <div id="sidebarReqSection"><div id="sidebarRequirements"></div><button id="refreshReqBtn"></button></div>
+            <div id="metrics"></div>
+          </div>
+
+          <div class="vsb-section" id="sidebarDebugSection" hidden>
             <div class="vsb-label">Debug</div>
             <button id="debugToggle" class="btn-ghost" type="button" style="font-size:11px;">Show</button>
             <pre id="debug" hidden></pre>
           </div>
+          </div><!-- /vsb-body -->
         </div><!-- /viewer-sidebar -->
 
-        <!-- HUD -->
-        <div class="hud" aria-hidden="true">
-          <div class="hud-card glass"><strong id="parcelHud">—</strong><span>parcel area</span></div>
-          <div class="hud-card glass"><strong id="buildableHud">—</strong><span>buildable area</span></div>
-          <div class="hud-card glass"><strong id="aduHud">—</strong><span>ADU footprint</span></div>
-          <div class="hud-card glass"><strong id="imageryHud">Satellite</strong><span>floor imagery</span></div>
-        </div>
+        <!-- HUD IDs kept in DOM for JS compat — not displayed -->
+        <strong id="parcelHud"   hidden aria-hidden="true"></strong>
+        <strong id="buildableHud" hidden aria-hidden="true"></strong>
+        <strong id="aduHud"      hidden aria-hidden="true"></strong>
+        <strong id="imageryHud"  hidden aria-hidden="true"></strong>
 
         <!-- Unit toggle -->
         <div class="viewer-unit-toggle glass" style="padding:4px;">
@@ -296,17 +607,9 @@
           </div>
         </div>
 
-        <!-- Help hint (pushed down from unit toggle) -->
-        <div class="help" id="helpHint" style="top:58px;">Click houses to hide · Drag the green ADU · Left-drag to pan · Right-drag to orbit</div>
+        <!-- Viewer hint — fades out automatically -->
+        <div class="viewer-hint" id="helpHint">Click houses to hide · Drag ADU · Left-drag to pan · Right-drag to orbit</div>
       </div><!-- /modelPanel -->
-
-      <!-- Financing panel -->
-      <div id="financingPanel" class="content-panel" hidden>
-        <h2>Estimated ADU Rent</h2>
-        <p>Projected monthly rent for the ADU at its current size, sourced from rental listings in this zip via HomeHarvest (Realtor.com). Updates live as you resize the ADU.</p>
-        <div id="rentCards" class="metrics" style="grid-template-columns: repeat(3, minmax(140px,1fr));"></div>
-        <p id="financingNote" class="help-text" style="margin-top:14px;">Load a site to fetch rent comps for this zip.</p>
-      </div>
 
       <!-- Real 3D panel -->
       <div id="real3dPanel" class="viewer-panel" hidden>
@@ -370,8 +673,106 @@
       </div>
     </div><!-- /stepModel -->
 
+    <!-- ── Step 5: Full Compliance Checklist ──────────────────────────── -->
+    <div id="stepChecklist" class="wizard-step" hidden>
+      <div class="wizard-container">
+        <div class="wizard-step-header">
+          <div class="wizard-step-number">
+            <div class="wizard-step-number-circle">4</div>
+            Full Review
+          </div>
+          <h2 class="wizard-step-title" id="checklistStepTitle">ADU Compliance Checklist</h2>
+          <p class="wizard-step-desc">Complete compliance picture for your ADU. GIS-backed items were auto-checked; Size &amp; Construction items need site-plan verification before submittal.</p>
+        </div>
+        <div id="fullChecklistSummary" class="checklist-summary" hidden></div>
+        <div id="checklistTabBar" class="checklist-tab-bar" role="tablist" aria-label="Checklist categories"></div>
+        <div id="fullChecklist" class="checklist"></div>
+        <div class="step-cta" style="margin-top:32px;">
+          <button id="continueToFinancingBtn" class="btn-primary" type="button">
+            View Rental Estimate
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Step 6: Financing ──────────────────────────────────────────── -->
+    <div id="stepFinancing" class="wizard-step" hidden>
+      <div class="wizard-container">
+        <div class="wizard-step-header">
+          <div class="wizard-step-number">
+            <div class="wizard-step-number-circle">5</div>
+            Investment
+          </div>
+          <h2 class="wizard-step-title">Rental Income Estimate</h2>
+          <p class="wizard-step-desc">Projected monthly rent based on rental comps in your zip code. Updates live as you resize the ADU in the 3D model.</p>
+        </div>
+        <div id="financingPanel">
+          <div id="rentCards" class="metrics financing-metrics"></div>
+          <p id="financingNote" class="help-text" style="margin-top:14px;">Load a site to fetch rent comps for this zip.</p>
+        </div>
+      </div>
+    </div>
+
   </main><!-- /#app -->
 
+  <script>
+    /* Landing screen navigation — runs synchronously before app.js */
+    (function () {
+      var SCREENS = ['lsHero', 'lsCity', 'lsAddress', 'lsContractors'];
+
+      function showScreen(id) {
+        SCREENS.forEach(function (s) {
+          var el = document.getElementById(s);
+          if (!el) return;
+          if (s === id) { el.classList.add('ls-active'); }
+          else          { el.classList.remove('ls-active'); }
+        });
+        var active = document.getElementById(id);
+        if (active) {
+          var first = active.querySelector('button:not([disabled]), input:not([hidden])');
+          if (first) { setTimeout(function () { first.focus(); }, 60); }
+        }
+      }
+
+      /* Audience toggle */
+      document.getElementById('btnHomeowners').addEventListener('click', function () {
+        showScreen('lsCity');
+      });
+      document.getElementById('btnContractors').addEventListener('click', function () {
+        showScreen('lsContractors');
+      });
+
+      /* Back buttons */
+      document.getElementById('cityBackBtn').addEventListener('click', function () { showScreen('lsHero'); });
+      document.getElementById('addressBackBtn').addEventListener('click', function () { showScreen('lsCity'); });
+      document.getElementById('contractorBackBtn').addEventListener('click', function () { showScreen('lsHero'); });
+
+      /* City card selection */
+      document.querySelectorAll('.city-card:not(.city-card-soon)').forEach(function (card) {
+        card.addEventListener('click', function () {
+          var city = card.dataset.city;
+          var sel = document.getElementById('citySelect');
+          if (sel) sel.value = city;
+          var badge = document.getElementById('selectedCityDisplay');
+          var name  = card.querySelector('.city-card-name');
+          if (badge && name) badge.textContent = name.textContent;
+          showScreen('lsAddress');
+          setTimeout(function () { var a = document.getElementById('address'); if (a) a.focus(); }, 60);
+        });
+      });
+
+      /* Reset to hero whenever the landing overlay is re-shown (home button) */
+      var overlay = document.getElementById('landingOverlay');
+      if (overlay && window.MutationObserver) {
+        new MutationObserver(function (mutations) {
+          mutations.forEach(function (m) {
+            if (!overlay.classList.contains('is-dismissed')) { showScreen('lsHero'); }
+          });
+        }).observe(overlay, { attributes: true, attributeFilter: ['class'] });
+      }
+    }());
+  </script>
   <script type="module" src="/static/app.js"></script>
 </body>
 </html>

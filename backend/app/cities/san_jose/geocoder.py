@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
 
 import httpx
 from fastapi import HTTPException
 
+logger = logging.getLogger(__name__)
+
+from app.cities.base import GeocodeResult
 from app.services.arcgis import fetch_json
+
+__all__ = [
+    "GEOCODE_MIN_SCORE",
+    "GeocodeResult",
+    "geocode_san_jose_address",
+    "normalize_address",
+]
 
 ARCGIS_GEOCODER_URL = (
     "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/"
@@ -25,18 +35,6 @@ _SAN_JOSE_BBOX = {
     "west": -122.08, "south": 37.10,
     "east": -121.55, "north": 37.50,
 }
-
-
-@dataclass(frozen=True)
-class GeocodeResult:
-    matched_address: str
-    latitude:        float
-    longitude:       float
-    score:           float
-    normalized_input: str
-    zip_code:        str
-    city:            str
-    state:           str
 
 
 def _inside_bbox(lon: float, lat: float) -> bool:
@@ -84,8 +82,16 @@ async def geocode_san_jose_address(
 
     for candidate in data.get("candidates") or []:
         location = candidate.get("location") or {}
-        lon = float(location.get("x") or 0.0)
-        lat = float(location.get("y") or 0.0)
+        x = location.get("x")
+        y = location.get("y")
+        if x is None or y is None:
+            logger.warning(
+                "Geocode candidate missing coordinates, skipping: %s",
+                candidate.get("address"),
+            )
+            continue
+        lon = float(x)
+        lat = float(y)
 
         if not _inside_bbox(lon, lat):
             continue
@@ -94,7 +100,9 @@ async def geocode_san_jose_address(
         city   = str(attrs.get("City")   or "").strip()
         region = str(attrs.get("Region") or "").strip().upper()
 
-        if city and "san jose" not in city.lower() and region not in ("CA", "CALIFORNIA"):
+        if city and "san jose" not in city.lower():
+            continue
+        if region and region not in ("CA", "CALIFORNIA"):
             continue
 
         score = float(candidate.get("score") or 0.0)

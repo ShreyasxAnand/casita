@@ -14,16 +14,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.clients.code_enforcement import CodeEnforcementData, CodeIssue
-from app.clients.designations import DesignationData
-from app.clients.permits import PermitRecord, PermitsData
-from app.result import FetchResult
-from app.rules.size_limits import adu_size_limits, setback_description
-from app.rules.zoning import (
+from app.cities.san_jose.code_enforcement import CodeEnforcementData, CodeIssue
+from app.cities.san_jose.designations import DesignationData
+from app.cities.san_jose.development_standards import (
+    AduConstraints,
+    get_constraints,
+    normalize_property_type,
+)
+from app.cities.san_jose.permits import PermitRecord, PermitsData
+from app.cities.san_jose.zoning import (
     GeneralPlanData,
     ZoningData,
     adu_eligibility,
     property_type_from_style,
+)
+from app.result import FetchResult
+from app.rules_common.state_standards import (
+    ca_impact_fees,
+    ca_ministerial_review,
+    ca_owner_occupancy,
+    ca_parking,
 )
 
 ADU_TYPE_LABELS = {
@@ -31,8 +41,6 @@ ADU_TYPE_LABELS = {
     "attached": "Attached ADU",
     "jadu": "JADU",
 }
-_IMPACT_FEE_THRESHOLD_SQFT = 750
-_REAR_YARD_MAX_COVERAGE_PCT = 40.0
 
 
 def _unknown_designation() -> FetchResult[DesignationData]:
@@ -99,8 +107,11 @@ class ChecklistContext:
     buildable_area_ft2: float
     adu_width_ft: float
     adu_depth_ft: float
+    adu_height_ft: float
     adu_area_ft2: float
     existing_footprint_ft2: float
+    building_count: int
+    front_edge_index: int | None
     rear_yard_coverage_pct: float
     fits_requested_size: bool
     property_type: str
@@ -108,8 +119,8 @@ class ChecklistContext:
     primary_sqft: float | None
     allowed: bool | None  # None when zoning/GP data was unavailable
     allowed_reason: str
-    size_limits: dict[str, Any]
-    max_this_type: float
+    standards: str          # "city" | "state"
+    constraints: AduConstraints
 
     # Typed designation results — FAILED means the service was unreachable.
     flood: FetchResult[DesignationData] = field(default_factory=_unknown_designation)
@@ -136,6 +147,21 @@ class ChecklistContext:
     def is_jadu(self) -> bool:
         return self.adu_type == "jadu"
 
+    @property
+    def has_primary_outline(self) -> bool:
+        return self.building_count > 0 and self.existing_footprint_ft2 > 0
+
+    @property
+    def geometry_needs_primary_outline(self) -> bool:
+        sep = self.constraints.min_building_separation_ft
+        return self.is_attached or (sep is not None and sep > 0)
+
+    @property
+    def geometry_needs_front_edge(self) -> bool:
+        offset = self.constraints.siting_min_front_offset_ft
+        setback = self.constraints.front_setback_ft
+        return (offset is not None and offset > 0) or setback > 0
+
     @classmethod
     def from_site_model(
         cls,
@@ -148,6 +174,8 @@ class ChecklistContext:
         adu_type: str = "detached",
         permits: FetchResult[PermitsData] | None = None,
         code_enforcement: FetchResult[CodeEnforcementData] | None = None,
+        standards: str = "city",
+        adu_stories: int = 1,
     ) -> "ChecklistContext":
         parcel = site_model.get("parcel") or {}
         buildable = site_model.get("buildable_zone") or {}
@@ -166,13 +194,18 @@ class ChecklistContext:
         buildable_area = float(buildable.get("area_ft2") or 0)
         adu_w = float(adu.get("width_ft") or 0)
         adu_d = float(adu.get("depth_ft") or 0)
+        adu_h = float(adu.get("height_ft") or 16.0)
         adu_area = adu_w * adu_d
-        existing_footprint = sum(
-            float(b.get("area_ft2") or 0) for b in site_model.get("buildings") or []
+        buildings = site_model.get("buildings") or []
+        # JADUs must fit within the existing primary residence/attached garage.
+        # Use the largest loaded building outline as the primary candidate;
+        # summing multiple detached structures could incorrectly make a JADU
+        # look feasible.
+        existing_footprint = max(
+            (float(b.get("area_ft2") or 0) for b in buildings),
+            default=0.0,
         )
-        rear_coverage = (
-            (existing_footprint + adu_area) / parcel_area * 100 if parcel_area > 0 else 0.0
-        )
+        rear_coverage = adu_area / parcel_area * 100 if parcel_area > 0 else 0.0
 
         style = property_stats.get("style") if property_stats.get("found") else None
         property_type = property_type_from_style(style)
@@ -194,7 +227,24 @@ class ChecklistContext:
             allowed, allowed_reason = adu_eligibility(
                 zoning_result.data, gp_result.data, property_type
             )
-        limits = adu_size_limits(parcel_area, primary_sqft, property_type, adu_type_key)
+
+        # Prefer pre-computed constraints embedded by the pipeline (includes encroachment state).
+        # Fall back to computing them here when called outside the pipeline (e.g. tests).
+        constraints_dict = site_model.get("applied_constraints")
+        if constraints_dict:
+            constraints = AduConstraints(**constraints_dict)
+        else:
+            zone = zoning_code_hint
+            prop_type_key = normalize_property_type(property_type)
+            rule_adu_type = (
+                adu_type_key if adu_type_key in ("detached", "attached", "jadu")
+                else "detached"
+            )
+            constraints = get_constraints(
+                standards, prop_type_key, rule_adu_type, adu_stories, zone,  # type: ignore[arg-type]
+                lot_size_sf=parcel_area,
+                main_home_livable_sf=primary_sqft,
+            )
 
         return cls(
             adu_type=adu_type_key,
@@ -210,8 +260,11 @@ class ChecklistContext:
             buildable_area_ft2=buildable_area,
             adu_width_ft=adu_w,
             adu_depth_ft=adu_d,
+            adu_height_ft=adu_h,
             adu_area_ft2=adu_area,
             existing_footprint_ft2=existing_footprint,
+            building_count=len(buildings),
+            front_edge_index=buildable.get("front_edge_index"),
             rear_yard_coverage_pct=rear_coverage,
             fits_requested_size=bool(adu.get("fits_requested_size")),
             property_type=property_type,
@@ -219,8 +272,8 @@ class ChecklistContext:
             primary_sqft=primary_sqft,
             allowed=allowed,
             allowed_reason=allowed_reason,
-            size_limits=limits,
-            max_this_type=float(limits.get("max_this_type") or 0),
+            standards=standards,
+            constraints=constraints,
             flood=designations.get("flood") or _no_data,
             geohazard=designations.get("geohazard") or _no_data,
             historic=designations.get("historic") or _no_data,
@@ -457,41 +510,18 @@ def _part2_designations(ctx: ChecklistContext) -> list[dict[str, Any]]:
 
 
 # ── Part 3: development standards (Q10–Q15+) ─────────────────────────────────
-_SITING_DETAILS = {
-    "detached": (
-        "Detached ADU (City Standards): must be behind the main home OR have a front setback "
-        ">= 45 ft from the front property line. Min 6 ft building separation from the main home "
-        "is required. Front yard placement is NOT permitted for detached ADUs (unless the 45-ft "
-        "setback rule is met). Front setback = per zoning Table 20-60. Confirm via site plan. "
-        "Note: under State Development Standards (§20.80.176) there is no siting restriction — "
-        "the detached ADU may be placed anywhere on the parcel."
-    ),
-    "attached": (
-        "Attached ADU (City Standards): NO siting restriction — may be located anywhere on the "
-        "parcel, INCLUDING the front yard. Front door must be on a DIFFERENT facade from the main "
-        "home entry. Front setback applies to the ADU facade the same as the primary dwelling "
-        "(per zoning Table 20-60). Prohibited if there is already an existing or proposed "
-        "conversion ADU on the property."
-    ),
-    "jadu": (
-        "JADU: must remain within the existing footprint of the single-family home "
-        "(including an attached garage). Up to 150 sf may be added for ingress/egress only. "
-        "Front setback may be encroached if needed to enable a minimum 800 sf unit."
-    ),
-}
-
 _TYPE_SELECTOR_DETAILS = {
     "detached": (
         "Detached ADU — a standalone structure separate from the primary home. "
-        "City Standards: must be sited in the rear yard or >= 45 ft from the front property line. "
-        "Min 6 ft separation from main home. Max 40% rear yard coverage. "
+        "City Standards (§20.80.175): must be in the rear yard or >= 45 ft from front property line; "
+        "min 6 ft separation from main home; max 40% rear yard coverage. "
         "State Standards (§20.80.176): no siting restriction."
     ),
     "attached": (
         "Attached ADU — shares a wall or structural element with the primary home. "
-        "NO siting restriction — can be located anywhere on the parcel, including front yard. "
-        "Front door must be on a DIFFERENT facade from the main home entry. "
-        "Note: prohibited if an existing or proposed conversion ADU is already on the property."
+        "No additional siting restriction beyond applicable setbacks — can be located in the "
+        "front yard only outside the required front setback. "
+        "Front door must be on a DIFFERENT facade from the main home entry."
     ),
     "jadu": (
         "JADU (Junior ADU) — built entirely within the existing footprint of the single-family "
@@ -501,47 +531,175 @@ _TYPE_SELECTOR_DETAILS = {
     ),
 }
 
-_HEIGHT_DETAILS = {
-    "detached": (
-        "Detached ADU — City Standards: 1st story max 18 ft; 2nd story max 25 ft "
-        "(up to 2 additional ft for a pitched roof). "
-        "State Standards: max 18 ft for new detached (up to 20 ft for pitched roof)."
-    ),
-    "attached": (
-        "Attached ADU — City Standards: max 25 ft (2 stories allowed). "
-        "State Standards: max 25 ft attached."
-    ),
-    "jadu": (
-        "JADU: no independent height limit — height is that of the existing primary structure."
-    ),
-}
+
+def _siting_detail(ctx: ChecklistContext) -> str:
+    c = ctx.constraints
+    if ctx.is_jadu:
+        return (
+            "JADU: must remain within the existing footprint of the single-family home "
+            "(including an attached garage). Up to 150 sf may be added for ingress/egress only."
+        )
+    if c.siting_min_front_offset_ft is not None:
+        sep = f"Min {c.min_building_separation_ft:.0f} ft" if c.min_building_separation_ft else "Min building"
+        cov = f"Max {c.max_rear_yard_coverage_pct:.0f}% rear yard coverage." if c.max_rear_yard_coverage_pct else ""
+        return (
+            f"Detached ADU ({ctx.standards.capitalize()} Standards): must be behind the main home OR "
+            f">= {c.siting_min_front_offset_ft:.0f} ft from the front property line. "
+            f"{sep} separation from main home required. {cov}"
+        )
+    if ctx.is_attached:
+        return (
+            f"Attached ADU ({ctx.standards.capitalize()} Standards): no additional siting "
+            "restriction beyond applicable setbacks; front-yard placement still must respect "
+            "the required front setback. "
+            "Front door must be on a different facade than the main home entry."
+        )
+    encroach = (
+        " Front setback encroachment active: waived because an 800 sf ADU cannot fit elsewhere."
+        if c.front_setback_encroachment_active else ""
+    )
+    return (
+        f"Detached ADU (State Standards §20.80.176): no siting restriction — "
+        f"may be placed anywhere on the parcel.{encroach}"
+    )
+
+
+def _height_detail(ctx: ChecklistContext) -> str:
+    c = ctx.constraints
+    if ctx.is_jadu or c.max_height_ft is None:
+        return "JADU: no independent height limit — height is that of the existing primary structure."
+    std_label = "City" if ctx.standards == "city" else "State"
+    return (
+        f"{ctx.adu_type_label} ({std_label} Standards): max {c.max_height_ft:.0f} ft. "
+        "Confirm final design height before submittal."
+    )
 
 
 def _size_status(ctx: ChecklistContext) -> tuple[str, float]:
     if ctx.parcel_area_ft2 <= 0:
         return "verify", 0.0
-    overage = max(0.0, ctx.adu_area_ft2 - ctx.max_this_type)
+    max_sf = ctx.constraints.max_adu_size_sf
+    overage = max(0.0, ctx.adu_area_ft2 - max_sf)
     return ("pass" if overage == 0 else "fail"), overage
 
 
 def _size_detail(ctx: ChecklistContext) -> str:
+    c = ctx.constraints
+    std_label = "City" if ctx.standards == "city" else "State"
     detail = (
-        f"Requested: {ctx.adu_area_ft2:,.0f} sf ({ctx.adu_width_ft:.0f} x {ctx.adu_depth_ft:.0f} ft). "
-        f"Tier: {ctx.size_limits['tier']}. "
-        f"Max for {ctx.adu_type_label}: {ctx.max_this_type:,.0f} sf."
+        f"Requested: {ctx.adu_area_ft2:,.0f} sf ({ctx.adu_width_ft:.0f} × {ctx.adu_depth_ft:.0f} ft). "
+        f"Max allowable: {c.max_adu_size_sf:,.0f} sf ({std_label} Standards, {ctx.adu_type_label})."
     )
     _, overage = _size_status(ctx)
     if overage > 0:
         detail += f" OVER by {overage:,.0f} sf — reduce footprint or switch to a smaller type."
     if ctx.primary_sqft and ctx.is_attached:
         detail += (
-            f" Attached cap = 50% of {ctx.primary_sqft:,.0f} sf primary = "
-            f"{ctx.primary_sqft * 0.5:,.0f} sf "
-            f"(capped at lot-tier max {ctx.max_this_type:,.0f} sf)."
+            f" Attached cap: 50% of {ctx.primary_sqft:,.0f} sf primary = "
+            f"{ctx.primary_sqft * 0.5:,.0f} sf; capped at lot-tier max {c.max_adu_size_sf:,.0f} sf."
         )
     if ctx.is_jadu:
         detail += " JADU must remain within the existing primary footprint."
-    return f"{detail} {ctx.size_limits['notes']}"
+    return detail
+
+
+def _setback_detail(ctx: ChecklistContext) -> str:
+    c = ctx.constraints
+    zone = ctx.zoning_result.data.zoning if ctx.zoning_result.data else "unknown zone"
+    parts = [
+        f"Front setback: {c.front_setback_ft:.0f} ft ({zone} per Table 20-60).",
+        f"Side setback: {c.min_side_setback_ft:.0f} ft.",
+        f"Rear setback: {c.min_rear_setback_ft:.0f} ft.",
+    ]
+    if c.siting_min_front_offset_ft is not None:
+        parts.append(
+            f"Siting: must be behind the main home OR >= {c.siting_min_front_offset_ft:.0f} ft "
+            "from the front property line."
+        )
+    if ctx.geometry_needs_front_edge:
+        if ctx.front_edge_index is None:
+            parts.append(
+                "Front property line was not selected, so the geometry model did not enforce "
+                "the front setback/siting distance."
+            )
+        else:
+            parts.append("Selected front property line was used for the geometry model.")
+    if c.min_building_separation_ft is not None:
+        parts.append(f"Min {c.min_building_separation_ft:.0f} ft separation from main home.")
+        if not ctx.has_primary_outline:
+            parts.append(
+                "No primary-residence footprint was found, so separation from the main home "
+                "could not be verified."
+            )
+    elif ctx.is_attached and not ctx.has_primary_outline:
+        parts.append(
+            "No primary-residence footprint was found, so the required attachment to the "
+            "main home could not be verified."
+        )
+    if ctx.standards == "state" and c.front_setback_encroachment_active:
+        parts.append(
+            "Front setback encroachment active (§20.80.176): waived because an 800 sf ADU "
+            "cannot fit elsewhere on the lot."
+        )
+    return " ".join(parts)
+
+
+def _setback_status_and_message(ctx: ChecklistContext) -> tuple[str, str]:
+    if ctx.is_jadu:
+        if not ctx.has_primary_outline:
+            return (
+                "verify",
+                "No primary-home footprint was found, so the app cannot verify that the "
+                "JADU remains within the existing single-family home or attached garage.",
+            )
+        if ctx.adu_area_ft2 > ctx.existing_footprint_ft2:
+            return (
+                "fail",
+                f"Requested JADU area ({ctx.adu_area_ft2:,.0f} sf) exceeds the loaded "
+                f"primary footprint ({ctx.existing_footprint_ft2:,.0f} sf).",
+            )
+        return (
+            "verify",
+            "JADU setbacks are those of the existing structure. Confirm on the site plan "
+            "that the JADU is entirely within the existing single-family home or attached "
+            "garage; this app does not verify interior layout.",
+        )
+
+    uncertainty: list[str] = []
+    if ctx.geometry_needs_front_edge and ctx.front_edge_index is None:
+        uncertainty.append(
+            "front property line was not selected, so the front setback/siting distance "
+            "was not enforced in geometry"
+        )
+    if ctx.geometry_needs_primary_outline and not ctx.has_primary_outline:
+        if ctx.is_attached:
+            uncertainty.append(
+                "no primary-residence footprint was found, so attachment to the main home "
+                "could not be verified"
+            )
+        else:
+            uncertainty.append(
+                "no primary-residence footprint was found, so required building separation "
+                "was not enforced"
+            )
+
+    if not ctx.fits_requested_size:
+        return (
+            "verify",
+            "ADU footprint does not fit the computed buildable zone — verify manual "
+            "placement or reduce size.",
+        )
+    if uncertainty:
+        return (
+            "verify",
+            "At the requested dimensions, the ADU fits the partial computed buildable zone, "
+            f"but {', and '.join(uncertainty)}.",
+        )
+    return (
+        "pass",
+        f"At {ctx.adu_width_ft:.0f} × {ctx.adu_depth_ft:.0f} ft, the ADU fits inside "
+        "the computed buildable zone.",
+    )
 
 
 def _part3_development_standards(ctx: ChecklistContext) -> list[dict[str, Any]]:
@@ -570,82 +728,134 @@ def _part3_development_standards(ctx: ChecklistContext) -> list[dict[str, Any]]:
         source=f"{ctx.zoning_result.source} + {ctx.gp_result.source}",
     ))
 
+    std_label = "City" if ctx.standards == "city" else "State"
+    std_code = "20.80.175" if ctx.standards == "city" else "20.80.176"
+
     items.append(_item(
         part=3, number=10.5, status="info",
-        question=f"ADU type selected: {ctx.adu_type_label}",
+        question=f"ADU type selected: {ctx.adu_type_label} ({std_label} Standards)",
         detail=_TYPE_SELECTOR_DETAILS.get(ctx.adu_type, "Unknown type selected."),
-        source="Bulletin #210 pp. 3-4 City Development Standards",
+        source=f"Bulletin #210 {std_label} Development Standards (§{std_code})",
     ))
 
     size_status, _ = _size_status(ctx)
     items.append(_item(
         part=3, number=11, status=size_status,
-        question="ADU maximum size (Bulletin #210 City Development Standards)",
+        question=f"ADU maximum size ({std_label} Development Standards §{std_code})",
         detail=_size_detail(ctx),
-        source="Bulletin #210 pp.3-4 / San Jose Municipal Code 20.80 Part 2.75",
+        source=f"Bulletin #210 / Municipal Code {std_code}",
     ))
 
     siting_status = "pass" if ctx.is_attached else ("info" if ctx.is_jadu else "verify")
     items.append(_item(
         part=3, number=12, status=siting_status,
         question=f"ADU siting — where can the {ctx.adu_type_label} be located on the parcel?",
-        detail=_SITING_DETAILS[ctx.adu_type],
-        source="Bulletin #210 p.3 City Development Standards table",
+        detail=_siting_detail(ctx),
+        source=f"Bulletin #210 {std_label} Development Standards table",
     ))
 
-    setback_status = (
-        "pass" if ctx.fits_requested_size
-        else ("verify" if ctx.buildable_area_ft2 <= 0 else "fail")
-    )
-    fits_msg = (
-        f"At {ctx.adu_width_ft:.0f} x {ctx.adu_depth_ft:.0f} ft, the ADU fits inside the computed "
-        "buildable zone." if ctx.fits_requested_size
-        else "ADU footprint does not fit the computed buildable zone — reduce size or relocate."
-    )
+    setback_status, fits_msg = _setback_status_and_message(ctx)
     items.append(_item(
         part=3, number=13, status=setback_status,
         question="Minimum setbacks",
-        detail=f"{setback_description(ctx.adu_type)} {fits_msg}",
-        source="Bulletin #210 p.3 + parcel/building geometry",
+        detail=f"{_setback_detail(ctx)} {fits_msg}",
+        source=f"Bulletin #210 {std_label} Standards + parcel/building geometry",
     ))
 
-    if ctx.is_detached:
-        rear_ok = ctx.rear_yard_coverage_pct <= _REAR_YARD_MAX_COVERAGE_PCT
-        rear_status = (
-            "pass" if (rear_ok and ctx.parcel_area_ft2 > 0)
-            else ("verify" if ctx.parcel_area_ft2 <= 0 else "fail")
-        )
+    max_coverage = ctx.constraints.max_rear_yard_coverage_pct
+    if ctx.is_detached and max_coverage is not None:
         items.append(_item(
-            part=3, number=14, status=rear_status,
-            question="Rear yard coverage — max 40% of rear yard covered by structures (footnote 5, detached only)",
+            part=3, number=14, status="verify",
+            question=f"Rear yard coverage — max {max_coverage:.0f}% of rear yard covered by structures (detached only)",
             detail=(
-                f"Estimated coverage: {ctx.rear_yard_coverage_pct:.1f}% "
-                f"(existing {ctx.existing_footprint_ft2:,.0f} sf + ADU {ctx.adu_area_ft2:,.0f} sf "
-                f"over parcel {ctx.parcel_area_ft2:,.0f} sf — parcel used as proxy; actual rear "
-                "yard is smaller so real % may be higher). "
-                "Not more than 40% of rear yard may be covered by structures (excluding pools)."
+                "Must be verified manually. "
+                f"Estimated ADU coverage: {ctx.rear_yard_coverage_pct:.1f}% "
+                f"(ADU {ctx.adu_area_ft2:,.0f} sf over entire parcel {ctx.parcel_area_ft2:,.0f} sf). "
+                "Parcel used as proxy; actual rear yard is smaller so real % may be higher. "
+                "Add any other existing rear-yard structures to this percentage. "
+                f"Max {max_coverage:.0f}% of rear yard may be covered (excluding pools)."
             ),
             source="Bulletin #210 footnote 5",
         ))
 
-    items.append(_item(
-        part=3, number=14.5,
-        status="pass" if ctx.buildable_area_ft2 > 0 else ("fail" if not ctx.is_jadu else "info"),
-        question="Buildable area after setbacks",
-        detail=(
+    if ctx.is_jadu:
+        if not ctx.has_primary_outline:
+            buildable_status = "verify"
+            buildable_detail = (
+                "No primary-residence footprint was found, so the app cannot identify "
+                "the existing footprint available for a JADU."
+            )
+        elif ctx.adu_area_ft2 > ctx.existing_footprint_ft2:
+            buildable_status = "fail"
+            buildable_detail = (
+                f"Requested JADU area ({ctx.adu_area_ft2:,.0f} sf) exceeds the largest "
+                f"loaded primary-footprint candidate ({ctx.existing_footprint_ft2:,.0f} sf)."
+            )
+        else:
+            buildable_status = "verify"
+            buildable_detail = (
+                f"JADU candidate footprint: {ctx.existing_footprint_ft2:,.0f} sf from the "
+                "largest loaded building outline. This verifies exterior footprint capacity "
+                "only; confirm the JADU is entirely within the existing single-family home "
+                "or attached garage on the site plan."
+            )
+    elif ctx.buildable_area_ft2 <= 0:
+        buildable_status = "fail" if not ctx.is_jadu else "info"
+        buildable_detail = (
+            "No buildable area detected — parcel may be too small or fully covered by the primary."
+        )
+    elif ctx.geometry_needs_primary_outline and not ctx.has_primary_outline:
+        buildable_status = "verify"
+        if ctx.is_attached:
+            buildable_detail = (
+                f"Computed partial buildable zone: {ctx.buildable_area_ft2:,.0f} sf. "
+                "No primary-residence footprint was found, so the app cannot verify that "
+                "the attached ADU shares a wall or structural element with the main home."
+            )
+        else:
+            buildable_detail = (
+                f"Computed partial buildable zone: {ctx.buildable_area_ft2:,.0f} sf. "
+                "No primary-residence footprint was found, so this area is only the parcel after "
+                "setbacks and does not subtract required clearance from the main home."
+            )
+    elif ctx.geometry_needs_front_edge and ctx.front_edge_index is None:
+        buildable_status = "verify"
+        buildable_detail = (
+            f"Computed partial buildable zone: {ctx.buildable_area_ft2:,.0f} sf. "
+            "Front property line was not selected, so front siting/setback geometry was not applied."
+        )
+    else:
+        buildable_status = "pass"
+        buildable_detail = (
             f"Computed buildable zone: {ctx.buildable_area_ft2:,.0f} sf "
             "(parcel minus setback buffers and primary-residence clearance)."
-            if ctx.buildable_area_ft2 > 0 else
-            "No buildable area detected — parcel may be too small or fully covered by the primary."
-        ),
+        )
+
+    items.append(_item(
+        part=3, number=14.5,
+        status=buildable_status,
+        question="Buildable area after setbacks",
+        detail=buildable_detail,
         source="Parcel / building geometry model",
     ))
 
+    c = ctx.constraints
+    if ctx.is_jadu or c.max_height_ft is None:
+        height_status = "verify" if ctx.is_jadu else "pass"
+    else:
+        height_status = "pass" if ctx.adu_height_ft <= c.max_height_ft else "fail"
+
     items.append(_item(
-        part=3, number=15, status="verify",
+        part=3, number=15, status=height_status,
         question="ADU height within limits",
-        detail=f"{_HEIGHT_DETAILS[ctx.adu_type]} Confirm final design height before submittal.",
-        source="Bulletin #210 p.3 Development Standards table",
+        detail=(
+            f"Requested: {ctx.adu_height_ft:.1f} ft. {_height_detail(ctx)}"
+            + (
+                f" OVER by {ctx.adu_height_ft - c.max_height_ft:.1f} ft."
+                if height_status == "fail" and c.max_height_ft is not None else ""
+            )
+        ),
+        source=f"Bulletin #210 {std_label} Development Standards table",
     ))
 
     return items
@@ -725,14 +935,6 @@ def _part4_fire_safety(ctx: ChecklistContext) -> list[dict[str, Any]]:
 
 # ── Part 5: miscellaneous (Q16–Q17) + supplemental info items ────────────────
 def _part5_misc(ctx: ChecklistContext) -> list[dict[str, Any]]:
-    over_impact_fee = ctx.adu_area_ft2 >= _IMPACT_FEE_THRESHOLD_SQFT
-    jadu_owner_occ = (
-        "JADU: owner-occupancy required (either the primary or the JADU) UNLESS the JADU has its "
-        "own sanitation facilities. Submit Form 313 – JADU Deed Restriction to Planning."
-        if ctx.is_jadu else
-        "Standard ADU: no owner-occupancy requirement (CA state law through 2030)."
-    )
-
     return [
         _item(
             part=5, number=22,
@@ -744,44 +946,11 @@ def _part5_misc(ctx: ChecklistContext) -> list[dict[str, Any]]:
             ),
             source=ctx.heritage.source or "San Jose Heritage Trees layer 511 / sanjoseca.gov/TreePermit",
         ),
-        _item(
-            part=5, number=23,
-            status="verify" if over_impact_fee else "pass",
-            question="Q17. School & parkland impact fees — ADU >= 750 sf?",
-            detail=(
-                f"ADU is {ctx.adu_area_ft2:,.0f} sf — school and parkland impact fees apply. "
-                "Building permit will not be issued until fees are paid. Staff provides school fee "
-                "referral at submittal."
-                if over_impact_fee else
-                f"ADU is {ctx.adu_area_ft2:,.0f} sf (below 750 sf) — no school or parkland "
-                "impact fees."
-            ),
-            source="Bulletin #210 Q17 / Fees for ADUs webpage",
-        ),
-        _item(
-            part=5, number=24, status="info",
-            question="Owner-occupancy requirement",
-            detail=jadu_owner_occ,
-            source="Bulletin #210 footnote 8 / CA state law (AB 881)",
-        ),
-        _item(
-            part=5, number=25, status="pass",
-            question="Parking requirements",
-            detail=(
-                "No parking required — exemptions: within 0.5 mi of public transit, "
-                "conversion of existing space, historic district, or car-share vehicle within 1 block."
-            ),
-            source="Bulletin #210 p.3 / CA state law (AB 68 / SB 13)",
-        ),
-        _item(
-            part=5, number=26, status="info",
-            question="Approval pathway",
-            detail=(
-                "Ministerial (by-right) review — no discretionary hearing if the ADU meets all "
-                "objective standards. Submit via the ADU Plan Review process at sanjoseca.gov/ADUs."
-            ),
-            source="CA state law / sanjoseca.gov/ADUs",
-        ),
+        # Items 23–26 are CA state-law items shared across all CA cities.
+        ca_impact_fees(ctx.adu_area_ft2, part=5, number=23),
+        ca_owner_occupancy(ctx.adu_type, part=5, number=24),
+        ca_parking(part=5, number=25),
+        ca_ministerial_review("sanjoseca.gov/ADUs", part=5, number=26),
     ]
 
 
@@ -795,6 +964,8 @@ def build_checklist(
     adu_type: str = "detached",
     permits: FetchResult[PermitsData] | None = None,
     code_enforcement: FetchResult[CodeEnforcementData] | None = None,
+    standards: str = "city",
+    adu_stories: int = 1,
 ) -> list[dict[str, Any]]:
     """Compose the full San Jose ADU Universal Checklist."""
     ctx = ChecklistContext.from_site_model(
@@ -806,6 +977,8 @@ def build_checklist(
         adu_type=adu_type,
         permits=permits,
         code_enforcement=code_enforcement,
+        standards=standards,
+        adu_stories=adu_stories,
     )
     return [
         *_part1_property_qualification(ctx),

@@ -1,0 +1,73 @@
+{
+  "front_setbacks_by_zone": {
+    "R-1-8":  20,
+    "R-1-5":  20,
+    "R-1-2":  30,
+    "R-1-1":  30,
+    "R-1-RR": 50,
+    "R-2":    15,
+    "R-M":    10,
+    "R-MH":   15
+  },
+
+  "lot_size_threshold_sf": 9000,
+
+  "single_family": {
+    "detached": {
+      "min_size_sf": 150,
+      "max_size_sf": {
+        "lot_lte_9000_sf": 1000,
+        "lot_gt_9000_sf": 1200
+      },
+      "min_side_setback_ft": { "story_1": 0, "story_2": 4 },
+      "min_rear_setback_ft": { "story_1": 0, "story_2": 4 },
+      "max_height_ft": { "story_1": 18, "story_2": 25 },
+      "max_stories": 2,
+      "siting_min_front_offset_ft": 45,
+      "max_rear_yard_coverage_pct": 40,
+      "min_building_separation_ft": 6
+    },
+    "attached": {
+      "min_size_sf": 150,
+      "max_size_sf": {
+        "lot_lte_9000_sf": 1000,
+        "lot_gt_9000_sf": 1200,
+        "fifty_pct_of_main_home_cap": true
+      },
+      "min_side_setback_ft": 0,
+      "min_rear_setback_ft": 0,
+      "max_height_ft": 25,
+      "max_stories": 2,
+      "siting_min_front_offset_ft": null
+    }
+  },
+
+  "multifamily": {
+    "detached": {
+      "min_size_sf": 150,
+      "max_size_sf": {
+        "lot_lte_9000_sf": { "value_sf": 1000, "fifty_pct_of_main_home_cap": true },
+        "lot_gt_9000_sf":  { "value_sf": 1200, "fifty_pct_of_main_home_cap": false }
+      },
+      "min_side_setback_ft": { "story_1": 0, "story_2": 4 },
+      "min_rear_setback_ft": { "story_1": 0, "story_2": 4 },
+      "max_height_ft": 25,
+      "max_stories": 2,
+      "siting_min_front_offset_ft": 45,
+      "max_rear_yard_coverage_pct": 40,
+      "min_building_separation_ft": 6
+    },
+    "attached": {
+      "min_size_sf": 150,
+      "max_size_sf": {
+        "lot_lte_9000_sf": { "value_sf": 1000, "fifty_pct_of_main_home_cap": true },
+        "lot_gt_9000_sf":  { "value_sf": 1200, "fifty_pct_of_main_home_cap": true }
+      },
+      "min_side_setback_ft": 0,
+      "min_rear_setback_ft": 0,
+      "max_height_ft": 25,
+      "max_stories": 2,
+      "siting_min_front_offset_ft": null
+    }
+  }
+}

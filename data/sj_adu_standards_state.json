@@ -1,0 +1,60 @@
+{
+  "front_setbacks_by_zone": {
+    "R-1-8":  20,
+    "R-1-5":  20,
+    "R-1-2":  30,
+    "R-1-1":  30,
+    "R-1-RR": 50,
+    "R-2":    15,
+    "R-M":    10,
+    "R-MH":   15
+  },
+
+  "lot_size_threshold_sf": 9000,
+
+  "single_family": {
+    "detached": {
+      "min_size_sf": 150,
+      "max_size_sf": 800,
+      "min_side_setback_ft": 4,
+      "min_rear_setback_ft": 4,
+      "max_height_ft": { "story_1": 18, "story_2": 18 },
+      "max_stories": 2,
+      "siting_min_front_offset_ft": null,
+      "front_setback_encroachment_allowed": true
+    },
+    "attached": {
+      "min_size_sf": 150,
+      "max_size_sf": 800,
+      "min_side_setback_ft": 4,
+      "min_rear_setback_ft": 4,
+      "max_height_ft": { "story_1": 25, "story_2": 25 },
+      "max_stories": 2,
+      "siting_min_front_offset_ft": null,
+      "front_setback_encroachment_allowed": true
+    }
+  },
+
+  "multifamily": {
+    "detached": {
+      "min_size_sf": 150,
+      "max_size_sf": 800,
+      "min_side_setback_ft": 4,
+      "min_rear_setback_ft": 4,
+      "max_height_ft": { "story_1": 18, "story_2": 18 },
+      "max_stories": 2,
+      "siting_min_front_offset_ft": null,
+      "front_setback_encroachment_allowed": true
+    },
+    "attached": {
+      "min_size_sf": 150,
+      "max_size_sf": 800,
+      "min_side_setback_ft": 4,
+      "min_rear_setback_ft": 4,
+      "max_height_ft": { "story_1": 25, "story_2": 25 },
+      "max_stories": 2,
+      "siting_min_front_offset_ft": null,
+      "front_setback_encroachment_allowed": true
+    }
+  }
+}

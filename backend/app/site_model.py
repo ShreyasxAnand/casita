@@ -56,6 +56,7 @@ ARCGIS_WORLD_STREET_EXPORT = (
 
 # Setback / clearance defaults applied to every parcel.
 _DEFAULT_SETBACK_FT = 4.0
+_FRONT_SETBACK_FT = 45.0   # detached ADU must be >= 45 ft from front property line
 _CLEARANCE_FROM_PRIMARY_FT = 6.0
 _DEFAULT_BUILDING_HEIGHT_FT = 18.0
 _DEFAULT_ADU_HEIGHT_FT = 16.0
@@ -184,8 +185,9 @@ def _height_source(props: dict[str, Any]) -> str:
 
 # ── Imagery descriptor ───────────────────────────────────────────────────────
 def _basemap_urls(export_url: str, common: dict[str, str]) -> dict[str, str]:
+    direct = f"{export_url}?{urlencode({**common, 'f': 'image'})}"
     return {
-        "url_image": f"{export_url}?{urlencode({**common, 'f': 'image'})}",
+        "url_image": f"/api/basemap?{urlencode({'src': direct})}",
         "url_json": f"{export_url}?{urlencode({**common, 'f': 'json'})}",
     }
 
@@ -282,24 +284,104 @@ def _build_imagery(parcel_utm: Polygon, cx: float, cy: float) -> dict[str, Any]:
     }
 
 
+# ── Front setback ────────────────────────────────────────────────────────────
+def _front_setback_zone(parcel: Polygon, front_edge_index: int, setback_m: float) -> Polygon:
+    """Return a polygon covering the parcel area within setback_m of the front edge.
+
+    The caller subtracts this from the buildable zone so only land behind the
+    45 ft front setback line is considered for ADU placement.
+    """
+    coords = list(parcel.exterior.coords)
+    n = len(coords) - 1  # number of edges; coords has n+1 entries (closed ring)
+    if not (0 <= front_edge_index < n):
+        return Polygon()
+
+    ax, ay = coords[front_edge_index]
+    bx, by = coords[front_edge_index + 1]
+
+    dx, dy = bx - ax, by - ay
+    length = math.hypot(dx, dy)
+    if length < 1e-9:
+        return Polygon()
+
+    ux, uy = dx / length, dy / length  # unit vector along the edge
+    # Two candidate inward normals (90° rotations of the edge direction).
+    n1x, n1y = -uy, ux
+    n2x, n2y = uy, -ux
+    pcx, pcy = parcel.centroid.x, parcel.centroid.y
+    mx, my = (ax + bx) / 2, (ay + by) / 2
+    inx, iny = (n1x, n1y) if (pcx - mx) * n1x + (pcy - my) * n1y > 0 else (n2x, n2y)
+
+    # Extend the edge endpoints well past the parcel so the slab spans the full width.
+    ext = parcel.length + setback_m
+    p1 = (ax - ux * ext, ay - uy * ext)
+    p2 = (bx + ux * ext, by + uy * ext)
+    p3 = (p2[0] + inx * setback_m, p2[1] + iny * setback_m)
+    p4 = (p1[0] + inx * setback_m, p1[1] + iny * setback_m)
+    return Polygon([p1, p2, p3, p4])
+
+
+def _front_depth_axis_angle(parcel: Polygon, front_edge_index: int) -> float | None:
+    """Return the front-to-back inward axis implied by a selected front edge."""
+    coords = list(parcel.exterior.coords)
+    n = len(coords) - 1
+    if not (0 <= front_edge_index < n):
+        return None
+
+    ax, ay = coords[front_edge_index]
+    bx, by = coords[front_edge_index + 1]
+    dx, dy = bx - ax, by - ay
+    length = math.hypot(dx, dy)
+    if length < 1e-9:
+        return None
+
+    ux, uy = dx / length, dy / length
+    n1x, n1y = -uy, ux
+    n2x, n2y = uy, -ux
+    pcx, pcy = parcel.centroid.x, parcel.centroid.y
+    mx, my = (ax + bx) / 2, (ay + by) / 2
+    inx, iny = (n1x, n1y) if (pcx - mx) * n1x + (pcy - my) * n1y > 0 else (n2x, n2y)
+    return _normalize_angle_deg(math.degrees(math.atan2(iny, inx)))
+
+
 # ── ADU placement search ─────────────────────────────────────────────────────
 def _rect_at(cx: float, cy: float, width_m: float, depth_m: float, angle_deg: float) -> Polygon:
     rect = box(cx - width_m / 2, cy - depth_m / 2, cx + width_m / 2, cy + depth_m / 2)
     return rotate(rect, angle_deg, origin=(cx, cy), use_radians=False)
 
 
+def _normalize_angle_deg(angle_deg: float) -> float:
+    return ((angle_deg + 180) % 360) - 180
+
+
 def _dominant_angle(poly: Polygon) -> float:
+    """Return the long-axis angle of the parcel/buildable polygon."""
     coords = list(poly.minimum_rotated_rectangle.exterior.coords)
     if len(coords) < 2:
         return 0.0
-    p0, p1 = coords[0], coords[1]
-    return math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
+
+    best_angle = 0.0
+    best_len = 0.0
+    for p0, p1 in zip(coords, coords[1:]):
+        dx = p1[0] - p0[0]
+        dy = p1[1] - p0[1]
+        length = math.hypot(dx, dy)
+        if length > best_len:
+            best_len = length
+            best_angle = math.degrees(math.atan2(dy, dx))
+    return _normalize_angle_deg(best_angle)
 
 
-def _candidate_angles(parcel_angle_deg: float) -> list[float]:
+def _adu_rotation_for_axis(axis_angle_deg: float, width_m: float, depth_m: float) -> float:
+    # `rotation_deg` rotates the ADU local width axis. When the ADU is deeper
+    # than wide, align its local depth axis with the property axis instead.
+    return _normalize_angle_deg(axis_angle_deg - (90 if depth_m > width_m else 0))
+
+
+def _candidate_angles(parcel_angle_deg: float, width_m: float, depth_m: float) -> list[float]:
     angles: list[float] = []
-    for a in (parcel_angle_deg, parcel_angle_deg + 90, 0, 90, 45, -45):
-        normalized = ((a + 180) % 360) - 180
+    for axis in (parcel_angle_deg, parcel_angle_deg + 90):
+        normalized = _adu_rotation_for_axis(axis, width_m, depth_m)
         if all(abs(normalized - existing) > 1 for existing in angles):
             angles.append(normalized)
     return angles
@@ -314,7 +396,7 @@ def _candidate_placements(
     if buildable.is_empty:
         return []
     polys = [buildable] if isinstance(buildable, Polygon) else list(buildable.geoms)
-    angles = _candidate_angles(angle_deg)
+    angles = _candidate_angles(angle_deg, width_m, depth_m)
     candidates: list[dict[str, Any]] = []
     for poly in sorted(polys, key=lambda p: p.area, reverse=True)[:4]:
         minx, miny, maxx, maxy = poly.bounds
@@ -335,7 +417,11 @@ def _candidate_placements(
                             "rotation_deg": candidate_angle,
                             "score": float(poly.boundary.distance(point)),
                         })
-    candidates.sort(key=lambda c: c["score"], reverse=True)
+    preferred_angle = angles[0] if angles else None
+    candidates.sort(
+        key=lambda c: (c["rotation_deg"] == preferred_angle, c["score"]),
+        reverse=True,
+    )
     return candidates[:8]
 
 
@@ -360,7 +446,16 @@ def _parcel_identifier(parcel_fc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# ── Public entry point ───────────────────────────────────────────────────────
+# ── Public entry points ──────────────────────────────────────────────────────
+def parcel_area_ft2_from_fc(parcel_fc: dict[str, Any]) -> float:
+    """Return parcel area in sq ft from a GeoJSON FeatureCollection. Returns 0.0 on error."""
+    try:
+        poly = _largest_polygon(unary_union(_fc_to_polygons(parcel_fc)))
+        return _largest_polygon(shapely_transform(TO_UTM, poly)).area * M2_TO_FT2
+    except Exception:
+        return 0.0
+
+
 def build_site_model(
     address: str,
     latitude: float,
@@ -369,8 +464,12 @@ def build_site_model(
     building_fc: dict[str, Any],
     adu_width_ft: float = 24.0,
     adu_depth_ft: float = 32.0,
-    setback_ft: float = _DEFAULT_SETBACK_FT,
+    adu_height_ft: float = 16.0,
+    side_rear_setback_ft: float = _DEFAULT_SETBACK_FT,
+    front_offset_ft: float = _FRONT_SETBACK_FT,
+    clearance_from_existing_ft: float = _CLEARANCE_FROM_PRIMARY_FT,
     building_height_ft: float = _DEFAULT_BUILDING_HEIGHT_FT,
+    front_edge_index: int | None = None,
 ) -> dict[str, Any]:
     parcel_wgs = _largest_polygon(unary_union(_fc_to_polygons(parcel_fc)))
     parcel = _largest_polygon(shapely_transform(TO_UTM, parcel_wgs))
@@ -381,9 +480,17 @@ def build_site_model(
     ]
     buildings = [b for b, _ in buildings_with_props]
 
-    setback_m = setback_ft / M_TO_FT
-    clearance_m = _CLEARANCE_FROM_PRIMARY_FT / M_TO_FT
+    setback_m = side_rear_setback_ft / M_TO_FT
+    clearance_m = clearance_from_existing_ft / M_TO_FT
     parcel_eroded = parcel.buffer(-setback_m, join_style=2).buffer(0)
+
+    front_edge_applied = False
+    if front_edge_index is not None and front_offset_ft > 0:
+        front_zone = _front_setback_zone(parcel, front_edge_index, front_offset_ft / M_TO_FT)
+        if not front_zone.is_empty:
+            parcel_eroded = parcel_eroded.difference(front_zone).buffer(0)
+            front_edge_applied = True
+
     if buildings:
         building_union = unary_union(buildings)
         buildable = parcel_eroded.difference(
@@ -446,9 +553,11 @@ def build_site_model(
         },
         "buildings": building_items,
         "buildable_zone": {
-            "setback_ft": setback_ft,
+            "setback_ft": side_rear_setback_ft,
             "setback_m": setback_m,
-            "clearance_from_existing_ft": _CLEARANCE_FROM_PRIMARY_FT,
+            "front_setback_ft": front_offset_ft if front_edge_applied else None,
+            "front_edge_index": front_edge_index if front_edge_applied else None,
+            "clearance_from_existing_ft": clearance_from_existing_ft,
             "clearance_from_existing_m": clearance_m,
             "area_ft2": sum(p.area for p in buildable_polys) * M2_TO_FT2,
             "polygons": [
@@ -462,7 +571,7 @@ def build_site_model(
         "adu": {
             "width_ft": adu_width_ft,
             "depth_ft": adu_depth_ft,
-            "height_ft": _DEFAULT_ADU_HEIGHT_FT,
+            "height_ft": adu_height_ft,
             "suggested_rotation_deg": parcel_angle,
             "placements": placements,
             "fits_requested_size": bool(placements),

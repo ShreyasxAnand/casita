@@ -17,12 +17,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from shapely.geometry import shape
 from shapely.ops import transform as shapely_transform, unary_union
 
+from app.cities import get_adapter, list_supported
 from app.models import SiteRequest
 from app.services.arcgis import TO_UTM, TO_WGS84
 from app.services.site_pipeline import run_site_pipeline
@@ -129,7 +130,7 @@ def get_site_sample():
         "site_model": site_model,
         "site_model_url": None,
         "zoning": {"district": {}, "general_plan": {}, "designations": {}},
-        "checklist": {"san_jose_checklist": []},
+        "checklist": {"items": [], "city": "san_jose"},
         "property_stats": {},
         "zip_context": {},
         "financing": {},
@@ -149,6 +150,27 @@ def get_site_sample():
     }
 
 
+@app.get("/api/basemap")
+async def proxy_basemap(src: str = Query(...)):
+    """Proxy an ArcGIS basemap image to the browser, bypassing CORS restrictions."""
+    if not src.startswith("https://services.arcgisonline.com/"):
+        raise HTTPException(400, "Only ArcGIS basemap sources are allowed.")
+    r = await app.state.http_client.get(src, follow_redirects=True)
+    return Response(content=r.content, media_type=r.headers.get("content-type", "image/png"))
+
+
+@app.get("/api/cities")
+def get_cities():
+    """List the supported cities the frontend dropdown can offer."""
+    return {
+        "cities": [
+            {"name": a.name, "display_name": a.display_name, "docs_url": a.docs_url}
+            for a in (get_adapter(c) for c in list_supported())
+        ]
+    }
+
+
 @app.post("/api/site")
 async def post_site(body: SiteRequest):
-    return await run_site_pipeline(app.state.http_client, body)
+    adapter = get_adapter(body.city)
+    return await run_site_pipeline(app.state.http_client, body, adapter)

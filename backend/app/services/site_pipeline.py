@@ -1,9 +1,9 @@
 """End-to-end pipeline for `POST /api/site`.
 
-Composes the geocoder, parcel/building clients, zoning + designation
-lookups, and the HomeHarvest property data into one response. Keeping this
-out of `main.py` lets routes stay thin and lets the pipeline be exercised
-in tests without spinning up FastAPI.
+City-agnostic. Composes the selected `CityAdapter`'s geocoder, parcel/building
+clients, zoning + designation lookups, permits/code-enforcement, and the
+HomeHarvest property data into one response. Each external fetch goes through
+the adapter so swapping cities is a single dispatch decision in `main.py`.
 """
 
 from __future__ import annotations
@@ -11,23 +11,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import time
 from typing import Any
 
 import httpx
 from fastapi import HTTPException
+from shapely.errors import GEOSException
+from shapely.geometry import MultiPolygon, Polygon, shape
+from shapely.ops import transform as shapely_transform, unary_union
 
-from app.clients import designations, geocoder
-from app.clients.buildings import fetch_buildings_for_parcel
-from app.clients.code_enforcement import CodeEnforcementData, fetch_code_enforcement
-from app.clients.designations import DesignationData
-from app.clients.geocoder import GeocodeResult
-from app.clients.parcels import fetch_parcel_at_point, parcel_apn
-from app.clients.permits import PermitsData, fetch_permits
-from app.clients.zoning import fetch_general_plan, fetch_zoning
-from app.rules.zoning import GeneralPlanData, ZoningData
+import dataclasses
+
+from app.cities.base import CityAdapter, GeocodeResult
+from app.cities.san_jose.development_standards import get_constraints, normalize_property_type
 from app.models import SiteRequest, stage, warn_stage
-from app.result import FetchResult
 from app.property_data import (
     avg_year_built,
     build_financing,
@@ -37,8 +35,9 @@ from app.property_data import (
     get_property_by_address,
     search_properties_by_zip,
 )
-from app.rules import build_checklist
-from app.site_model import build_site_model
+from app.result import FetchResult
+from app.services.arcgis import TO_UTM
+from app.site_model import M_TO_FT, build_site_model, parcel_area_ft2_from_fc
 
 logger = logging.getLogger(__name__)
 
@@ -47,56 +46,12 @@ def _feature_collection(features: list[dict[str, Any]]) -> dict[str, Any]:
     return {"type": "FeatureCollection", "features": features}
 
 
-def _serialise_designation(r: FetchResult[DesignationData]) -> dict[str, Any]:
-    d: dict[str, Any] = {"status": r.status.value, "source": r.source}
-    if r.data is not None:
-        d["present"] = r.data.present
-        d["detail"] = r.data.detail
-    if r.error is not None:
-        d["error"] = r.error
-    return d
-
-
-def _serialise_zoning_result(r: FetchResult[ZoningData]) -> dict[str, Any]:
-    d: dict[str, Any] = {"status": r.status.value, "source": r.source}
-    if r.data is not None:
-        d.update({
-            "zoning": r.data.zoning,
-            "zoning_abbrev": r.data.zoning_abbrev,
-            "zoning_full_name": r.data.zoning_full_name,
-            "facility_id": r.data.facility_id,
-            "rezoning_file": r.data.rezoning_file,
-            "pd_use": r.data.pd_use,
-            "pd_density": r.data.pd_density,
-            "developed_as_pd": r.data.developed_as_pd,
-            "approval_date": r.data.approval_date,
-            "notes": r.data.notes,
-        })
-    if r.error is not None:
-        d["error"] = r.error
-    return d
-
-
-def _serialise_gp_result(r: FetchResult[GeneralPlanData]) -> dict[str, Any]:
-    d: dict[str, Any] = {"status": r.status.value, "source": r.source}
-    if r.data is not None:
-        d.update({
-            "gp_designation": r.data.gp_designation,
-            "gp_abbreviation": r.data.gp_abbreviation,
-            "notes": r.data.notes,
-            "last_update": r.data.last_update,
-        })
-    if r.error is not None:
-        d["error"] = r.error
-    return d
-
-
 def _collect_data_warnings(
-    zoning_result: FetchResult[ZoningData],
-    gp_result: FetchResult[GeneralPlanData],
-    typed_designations: dict[str, FetchResult[DesignationData]],
-    permits_result: FetchResult[PermitsData] | None = None,
-    ce_result: FetchResult[CodeEnforcementData] | None = None,
+    zoning_result: FetchResult[Any],
+    gp_result: FetchResult[Any],
+    typed_designations: dict[str, FetchResult[Any]],
+    permits_result: FetchResult[Any] | None,
+    ce_result: FetchResult[Any] | None,
 ) -> list[dict[str, Any]]:
     warnings: list[dict[str, Any]] = []
     for field, result in [("zoning", zoning_result), ("general_plan", gp_result)]:
@@ -118,154 +73,6 @@ def _collect_data_warnings(
             "error": ce_result.error,
         })
     return warnings
-
-
-def _serialise_permits_result(r: FetchResult[PermitsData]) -> dict[str, Any]:
-    d: dict[str, Any] = {"status": r.status.value, "source": r.source}
-    if r.error:
-        d["error"] = r.error
-    if r.data:
-        d["active_count"] = r.data.active_count
-        d["finalized_count"] = r.data.finalized_count
-        d["total_count"] = len(r.data.records)
-        d["has_pool_permit"] = r.data.has_pool_permit
-        d["pool_permits"] = [
-            {
-                "folder_num": p.folder_num,
-                "work_desc": p.work_desc,
-                "sub_desc": p.sub_desc,
-                "status": p.status,
-                "issue_date": p.issue_date,
-                "final_date": p.final_date,
-            }
-            for p in r.data.pool_permits
-        ]
-    return d
-
-
-def _serialise_ce_result(r: FetchResult[CodeEnforcementData]) -> dict[str, Any]:
-    d: dict[str, Any] = {"status": r.status.value, "source": r.source}
-    if r.error:
-        d["error"] = r.error
-    if r.data:
-        d["complaint_count"] = r.data.complaint_count
-        d["investigation_count"] = r.data.investigation_count
-        d["total_count"] = r.data.total_count
-        d["issues"] = [
-            {
-                "issue_type": i.issue_type,
-                "identifier": i.identifier,
-                "description": i.description,
-                "open_date": i.open_date,
-                "status": i.status,
-                "program": i.program,
-            }
-            for i in r.data.issues
-        ]
-    return d
-
-
-async def _permits_and_enforcement_block(
-    client: httpx.AsyncClient,
-    apn: str | None,
-    lat: float,
-    lon: float,
-) -> tuple[FetchResult[PermitsData], FetchResult[CodeEnforcementData], list[dict[str, Any]]]:
-    """Fetch permits (pool check) and code-enforcement data concurrently."""
-    start = time.perf_counter()
-    permits_result, ce_result = await asyncio.gather(
-        fetch_permits(client, apn or ""),
-        fetch_code_enforcement(client, apn or "", lat, lon),
-    )
-    permit_summary = (
-        f"{permits_result.data.active_count} active, "
-        f"{permits_result.data.finalized_count} finalized."
-        if permits_result.is_ok and permits_result.data
-        else permits_result.error or permits_result.status.value
-    )
-    ce_summary = (
-        f"{ce_result.data.total_count} issue(s) "
-        f"({ce_result.data.complaint_count} complaint(s), "
-        f"{ce_result.data.investigation_count} investigation(s))."
-        if ce_result.is_ok and ce_result.data
-        else "none" if ce_result.is_absent
-        else ce_result.error or ce_result.status.value
-    )
-    any_failed = permits_result.is_failed or ce_result.is_failed
-    return permits_result, ce_result, [
-        stage(
-            "fetch_permits_enforcement", start,
-            f"Permits: {permit_summary} Code enforcement: {ce_summary}",
-            {
-                "permits_status": permits_result.status.value,
-                "ce_status": ce_result.status.value,
-                "permit_active": permits_result.data.active_count if permits_result.data else None,
-                "permit_finalized": permits_result.data.finalized_count if permits_result.data else None,
-                "ce_total": ce_result.data.total_count if ce_result.data else None,
-                "ce_complaints": ce_result.data.complaint_count if ce_result.data else None,
-                "ce_investigations": ce_result.data.investigation_count if ce_result.data else None,
-            },
-            status="warn" if any_failed else "ok",
-        ),
-    ]
-
-
-async def _zoning_block(
-    client: httpx.AsyncClient, latitude: float, longitude: float
-) -> tuple[FetchResult[ZoningData], FetchResult[GeneralPlanData], list[dict[str, Any]]]:
-    """Fetch zoning + GP concurrently; failures are captured in FetchResult, not raised."""
-    start = time.perf_counter()
-    zoning_result, gp_result = await asyncio.gather(
-        fetch_zoning(client, latitude, longitude),
-        fetch_general_plan(client, latitude, longitude),
-    )
-    zoning_code = zoning_result.data.zoning if zoning_result.data else None
-    gp_desig = gp_result.data.gp_designation if gp_result.data else None
-    any_failed = zoning_result.is_failed or gp_result.is_failed
-    if any_failed:
-        parts = []
-        if zoning_result.is_failed:
-            parts.append(f"Zoning failed: {zoning_result.error}")
-        else:
-            parts.append(f"Zoning: {zoning_code or 'unknown'}")
-        if gp_result.is_failed:
-            parts.append(f"GP failed: {gp_result.error}")
-        else:
-            parts.append(f"GP: {gp_desig or 'unknown'}")
-        detail = ". ".join(parts) + "."
-    else:
-        detail = (
-            f"Loaded zoning district {zoning_code or 'unknown'} and "
-            f"General Plan {gp_desig or 'unknown'}."
-        )
-    return zoning_result, gp_result, [
-        stage(
-            "fetch_zoning", start, detail,
-            {
-                "zoning": zoning_code,
-                "gp": gp_desig,
-                "zoning_status": zoning_result.status.value,
-                "gp_status": gp_result.status.value,
-            },
-            status="warn" if any_failed else "ok",
-        ),
-    ]
-
-
-async def _designations_block(
-    client: httpx.AsyncClient,
-    latitude: float,
-    longitude: float,
-    parcel_feature: dict[str, Any],
-) -> tuple[dict[str, FetchResult[DesignationData]], dict[str, Any]]:
-    start = time.perf_counter()
-    typed = await designations.fetch_all(client, latitude, longitude, parcel_feature)
-    serialised = {k: _serialise_designation(v) for k, v in typed.items()}
-    return typed, stage(
-        "fetch_designations", start,
-        "Loaded flood, geohazard, historic, WUI, and heritage-tree designation layers.",
-        serialised,
-    )
 
 
 async def _property_data_block(
@@ -328,25 +135,30 @@ async def _property_data_block(
     return property_stats, zip_context, financing, stage_entry
 
 
-def _make_job_id(prefix: str, parcel_fc: dict[str, Any], address: str, lat: float, lon: float) -> str:
-    """Derive a stable job ID from the parcel APN, falling back to a short
-    hash of the address + coordinates when no APN is available.
+def _make_job_id(prefix: str, parcel_id: str | None, address: str, lat: float, lon: float) -> str:
+    """Derive a stable job ID from the parcel APN (or equivalent), falling back
+    to a short hash of the address + coordinates when no parcel id is available.
     """
-    apn = parcel_apn(parcel_fc)
-    if apn:
-        return f"{prefix}-{apn}"
+    if parcel_id:
+        return f"{prefix}-{parcel_id}"
     digest = hashlib.sha1(f"{address}|{lat}|{lon}".encode("utf-8")).hexdigest()[:10]
     return f"{prefix}-{digest}"
 
 
-def _site_model_stage(building_source: str) -> dict[str, Any]:
+def _site_model_stage(building_source: str, adu_type: str) -> dict[str, Any]:
     """Synthetic stage entry that reports on the local 3D-geometry build."""
-    detail = (
-        "Generated parcel-local 3D geometry from live outlines."
-        if building_source != "not_found"
-        else "Generated parcel-local geometry. No primary-residence outline found — "
-             "buildable zone = full setback-eroded parcel."
-    )
+    if building_source != "not_found":
+        detail = "Generated parcel-local 3D geometry from live outlines."
+    elif adu_type == "jadu":
+        detail = (
+            "Generated parcel-local geometry. No primary-residence outline found — "
+            "JADU footprint capacity cannot be verified."
+        )
+    else:
+        detail = (
+            "Generated parcel-local geometry. No primary-residence outline found — "
+            "buildable zone = full setback-eroded parcel and checklist items are marked verify."
+        )
     return {
         "name": "site_model",
         "status": "ok",
@@ -357,24 +169,179 @@ def _site_model_stage(building_source: str) -> dict[str, Any]:
     }
 
 
+def _largest_polygon(geom) -> Polygon:
+    if isinstance(geom, Polygon):
+        return geom
+    if isinstance(geom, MultiPolygon):
+        return max(geom.geoms, key=lambda p: p.area)
+    polys = [g for g in getattr(geom, "geoms", []) if isinstance(g, Polygon)]
+    if not polys:
+        raise ValueError("Expected polygon geometry.")
+    return max(polys, key=lambda p: p.area)
+
+
+def _feature_polygons_utm(fc: dict[str, Any]) -> list[Polygon]:
+    polygons: list[Polygon] = []
+    for feature in fc.get("features") or []:
+        geom = feature.get("geometry")
+        if not geom:
+            continue
+        try:
+            polygons.append(_largest_polygon(shapely_transform(TO_UTM, shape(geom))).buffer(0))
+        except (GEOSException, TypeError, ValueError) as exc:
+            logger.debug("Skipping geometry while deriving state-fit inputs: %s", exc)
+    return [p for p in polygons if not p.is_empty]
+
+
+def _front_frame_state_fit_inputs(
+    parcel_fc: dict[str, Any],
+    building_fc: dict[str, Any],
+    front_edge_index: int | None,
+) -> dict[str, Any]:
+    """Approximate State Standards 800 sf fit inputs from real parcel geometry.
+
+    San Jose's State Standards allow front-setback encroachment only when no
+    other siting enables an 800 sf ADU. The standards engine evaluates a
+    front-oriented rectangle model, so we derive that model only when the user
+    has selected a front edge and a primary-building footprint exists.
+    """
+    if front_edge_index is None:
+        return {}
+
+    parcels = _feature_polygons_utm(parcel_fc)
+    buildings = _feature_polygons_utm(building_fc)
+    if not parcels or not buildings:
+        return {}
+
+    parcel = _largest_polygon(unary_union(parcels)).buffer(0)
+    primary = max(buildings, key=lambda p: p.area).intersection(parcel).buffer(0)
+    if parcel.is_empty or primary.is_empty:
+        return {}
+
+    coords = list(parcel.exterior.coords)
+    edge_count = len(coords) - 1
+    if not (0 <= front_edge_index < edge_count):
+        return {}
+
+    ax, ay = coords[front_edge_index]
+    bx, by = coords[front_edge_index + 1]
+    dx, dy = bx - ax, by - ay
+    length = math.hypot(dx, dy)
+    if length < 1e-9:
+        return {}
+
+    ux, uy = dx / length, dy / length
+    n1x, n1y = -uy, ux
+    n2x, n2y = uy, -ux
+    pcx, pcy = parcel.centroid.x, parcel.centroid.y
+    mx, my = (ax + bx) / 2, (ay + by) / 2
+    inx, iny = (n1x, n1y) if (pcx - mx) * n1x + (pcy - my) * n1y > 0 else (n2x, n2y)
+
+    def project(point: tuple[float, float]) -> tuple[float, float]:
+        vx = point[0] - ax
+        vy = point[1] - ay
+        return vx * ux + vy * uy, vx * inx + vy * iny
+
+    parcel_pts = [project((x, y)) for x, y in list(parcel.exterior.coords)[:-1]]
+    home_pts = [project((x, y)) for x, y in list(_largest_polygon(primary).exterior.coords)[:-1]]
+    if not parcel_pts or not home_pts:
+        return {}
+
+    min_px = min(x for x, _ in parcel_pts)
+    max_px = max(x for x, _ in parcel_pts)
+    min_py = min(y for _, y in parcel_pts)
+    max_py = max(y for _, y in parcel_pts)
+    min_hx = min(x for x, _ in home_pts)
+    max_hx = max(x for x, _ in home_pts)
+    min_hy = min(y for _, y in home_pts)
+    max_hy = max(y for _, y in home_pts)
+
+    lot_width_m = max_px - min_px
+    lot_depth_m = max_py - min_py
+    home_width_m = max_hx - min_hx
+    home_depth_m = max_hy - min_hy
+    if min(lot_width_m, lot_depth_m, home_width_m, home_depth_m) <= 0:
+        return {}
+
+    return {
+        "lot_width_ft": lot_width_m * M_TO_FT,
+        "lot_depth_ft": lot_depth_m * M_TO_FT,
+        "home_footprint": {
+            "x": (min_hx - min_px) * M_TO_FT,
+            "y": (min_hy - min_py) * M_TO_FT,
+            "width": home_width_m * M_TO_FT,
+            "depth": home_depth_m * M_TO_FT,
+        },
+    }
+
+
+def _apply_jadu_buildable_zone(site_model: dict[str, Any]) -> None:
+    """For JADUs, the only candidate footprint is the existing primary structure.
+
+    The generic site-model builder computes outdoor parcel buildable area.
+    JADUs are different: they must be inside the existing single-family home
+    or attached garage, so expose the largest loaded building footprint as the
+    model's buildable zone. If no building outline exists, expose an empty
+    zone so downstream UI/checklist code cannot treat the parcel envelope as
+    JADU-ready.
+    """
+    buildable = site_model.setdefault("buildable_zone", {})
+    adu = site_model.setdefault("adu", {})
+    buildings = site_model.get("buildings") or []
+    if not buildings:
+        adu["placements"] = []
+        adu["fits_requested_size"] = False
+        buildable.update({
+            "setback_ft": 0.0,
+            "setback_m": 0.0,
+            "front_setback_ft": None,
+            "front_edge_index": None,
+            "clearance_from_existing_ft": 0.0,
+            "clearance_from_existing_m": 0.0,
+            "area_ft2": 0.0,
+            "polygons": [],
+            "parcel_eroded_polygons": [],
+        })
+        return
+
+    primary = max(buildings, key=lambda b: float(b.get("area_ft2") or 0.0))
+    primary_area = float(primary.get("area_ft2") or 0.0)
+    primary_rings = primary.get("rings_local") or []
+    adu["placements"] = []
+    adu["fits_requested_size"] = False
+    primary_poly = [{"rings_local": primary_rings, "area_ft2": primary_area}] if primary_rings else []
+    buildable.update({
+        "setback_ft": 0.0,
+        "setback_m": 0.0,
+        "front_setback_ft": None,
+        "front_edge_index": None,
+        "clearance_from_existing_ft": 0.0,
+        "clearance_from_existing_m": 0.0,
+        "area_ft2": primary_area,
+        "polygons": primary_poly,
+        "parcel_eroded_polygons": [{"rings_local": primary_rings}] if primary_rings else [],
+    })
+
+
 async def run_site_pipeline(
-    client: httpx.AsyncClient, req: SiteRequest
+    client: httpx.AsyncClient, req: SiteRequest, adapter: CityAdapter,
 ) -> dict[str, Any]:
     """Full live-address pipeline used by `POST /api/site`.
 
     Reads top-to-bottom as five phases:
-      1. Geocode the address.
+      1. Geocode the address (adapter validates the address belongs to its city).
       2. Kick HomeHarvest lookups off in worker threads (overlap with GIS).
-      3. Fetch parcel + building outlines from San Jose GIS.
-      4. Fetch zoning, General Plan, and designation layers.
+      3. Fetch parcel + building outlines via the adapter.
+      4. Fetch zoning, General Plan, designations, permits, code enforcement.
       5. Build the site model, derive job id + checklist, assemble response.
     """
     stages: list[dict[str, Any]] = []
 
     # 1. Geocode ─────────────────────────────────────────────────────────
     start = time.perf_counter()
-    geocode = await geocoder.geocode_san_jose_address(client, req.address)
+    geocode = await adapter.geocode(client, req.address)
     lat, lon = geocode.latitude, geocode.longitude
+    address = geocode.matched_address
     stages.append(stage(
         "geocode_address", start,
         f"Matched '{geocode.matched_address}' (score {geocode.score:.0f}/100).",
@@ -382,64 +349,117 @@ async def run_site_pipeline(
     ))
 
     # 2. HomeHarvest (overlapped with GIS calls below) ───────────────────
-    prop_data_task = asyncio.create_task(
-        _property_data_block(req, geocode)
-    )
+    prop_data_task = asyncio.create_task(_property_data_block(req, geocode))
 
     # 3. Parcel + buildings ──────────────────────────────────────────────
     start = time.perf_counter()
-    parcel_feature, parcel_source = await fetch_parcel_at_point(client, lat, lon)
+    parcel_feature, parcel_source = await adapter.fetch_parcel(client, lat, lon)
     parcel_fc = _feature_collection([parcel_feature])
     stages.append(stage(
-        "fetch_san_jose_parcel", start,
-        f"Loaded parcel from San Jose GIS using {parcel_source}.",
+        f"fetch_{adapter.name}_parcel", start,
+        f"Loaded parcel from {adapter.display_name} GIS using {parcel_source}.",
         {"feature_count": 1, "source": parcel_source},
     ))
 
     start = time.perf_counter()
-    building_fc, building_source = await fetch_buildings_for_parcel(client, parcel_feature)
+    building_fc, building_source = await adapter.fetch_buildings(client, parcel_feature)
     feature_count = len(building_fc["features"])
+    req_adu_type = (req.adu_type or "detached").lower().strip()
     stages.append(stage(
         "fetch_building_outlines", start,
         (
             f"Loaded {feature_count} building outline(s) from {building_source}."
             if feature_count > 0
+            else "No building outlines found — JADU footprint capacity cannot be verified."
+            if req_adu_type == "jadu"
             else "No building outlines found — buildable zone will use the full eroded parcel."
         ),
         {"feature_count": feature_count, "source": building_source},
     ))
 
-    # 4. Zoning + designations ───────────────────────────────────────────
-    zoning_result, gp_result, zoning_stages = await _zoning_block(client, lat, lon)
+    # 4. Zoning + designations + permits + code enforcement ─────────────
+    zoning_result, gp_result, zoning_stages = await adapter.fetch_zoning_and_gp(client, lat, lon)
     stages.extend(zoning_stages)
 
     try:
-        typed_designations, dstage = await _designations_block(client, lat, lon, parcel_feature)
+        typed_designations, dstage = await adapter.fetch_designations(
+            client, lat, lon, parcel_feature,
+        )
         stages.append(dstage)
     except HTTPException as exc:
-        typed_designations: dict[str, FetchResult[DesignationData]] = {}
+        typed_designations = {}
         stages.append(warn_stage("fetch_designations", f"Designation lookup failed: {exc.detail}"))
 
-    apn = parcel_apn(parcel_fc)
-    permits_result, ce_result, pe_stages = await _permits_and_enforcement_block(
-        client, apn, lat, lon
+    parcel_id = adapter.parcel_id(parcel_fc)
+    permits_result, ce_result, pe_stages = await adapter.fetch_permits_and_enforcement(
+        client, parcel_id, lat, lon,
     )
     stages.extend(pe_stages)
 
     property_stats, zip_context, financing, prop_stage = await prop_data_task
     stages.append(prop_stage)
 
-    # 5. Site model, checklist, response ─────────────────────────────────
+    # 5. Resolve development-standards constraints ────────────────────────
+    parcel_area_ft2 = parcel_area_ft2_from_fc(parcel_fc)
+    zone = zoning_result.data.zoning if zoning_result.data else ""
+    adu_type_key = (req.adu_type or "detached").lower().strip()
+    if adu_type_key not in ("detached", "attached", "jadu"):
+        adu_type_key = "detached"
+    prop_type_key = normalize_property_type(
+        property_stats.get("style") or "" if property_stats.get("found") else ""
+    )
+    primary_sqft: float | None = (
+        float(property_stats["sqft"])
+        if property_stats.get("found") and property_stats.get("sqft")
+        else None
+    )
+    state_fit_inputs = (
+        _front_frame_state_fit_inputs(parcel_fc, building_fc, req.front_edge_index)
+        if req.standards == "state"
+        else {}
+    )
+    constraints = get_constraints(
+        req.standards, prop_type_key, adu_type_key, req.adu_stories, zone,
+        lot_size_sf=parcel_area_ft2,
+        main_home_livable_sf=primary_sqft,
+        lot_width_ft=state_fit_inputs.get("lot_width_ft"),
+        lot_depth_ft=state_fit_inputs.get("lot_depth_ft"),
+        home_footprint=state_fit_inputs.get("home_footprint"),
+    )
+    # Effective front offset: siting rule (city detached = 45 ft) takes priority;
+    # otherwise use the zone-based front setback from the standards.
+    effective_front_offset_ft = (
+        constraints.siting_min_front_offset_ft
+        if constraints.siting_min_front_offset_ft is not None
+        else constraints.front_setback_ft
+    )
+
+    # 6. Site model, checklist, response ─────────────────────────────────
     site_model = build_site_model(
-        address=geocode.matched_address,
+        address=address,
         latitude=lat,
         longitude=lon,
         parcel_fc=parcel_fc,
         building_fc=building_fc,
         adu_width_ft=req.adu_width_ft,
         adu_depth_ft=req.adu_depth_ft,
+        adu_height_ft=req.adu_height_ft,
+        side_rear_setback_ft=constraints.min_side_setback_ft,
+        front_offset_ft=effective_front_offset_ft,
+        clearance_from_existing_ft=constraints.min_building_separation_ft or 0.0,
+        front_edge_index=req.front_edge_index,
     )
-    checklist = build_checklist(
+    if adu_type_key == "jadu":
+        _apply_jadu_buildable_zone(site_model)
+    # Embed constraints so the checklist and frontend both read the resolved values.
+    site_model["applied_constraints"] = dataclasses.asdict(constraints)
+    site_model["standards"] = req.standards
+    site_model["adu_type"] = adu_type_key
+    site_model["adu_stories"] = req.adu_stories
+    if state_fit_inputs:
+        site_model["state_fit_inputs"] = state_fit_inputs
+
+    checklist = adapter.build_checklist(
         site_model,
         zoning=zoning_result,
         general_plan=gp_result,
@@ -448,15 +468,19 @@ async def run_site_pipeline(
         adu_type=req.adu_type,
         permits=permits_result,
         code_enforcement=ce_result,
+        standards=req.standards,
+        adu_stories=req.adu_stories,
     )
-    stages.append(_site_model_stage(building_source))
+    stages.append(_site_model_stage(building_source, adu_type_key))
 
     data_warnings = _collect_data_warnings(
-        zoning_result, gp_result, typed_designations, permits_result, ce_result
+        zoning_result, gp_result, typed_designations, permits_result, ce_result,
     )
 
     return {
-        "job_id": _make_job_id("san-jose", parcel_fc, geocode.matched_address, lat, lon),
+        "job_id": _make_job_id(adapter.name, parcel_id, geocode.matched_address, lat, lon),
+        "city": adapter.name,
+        "city_display_name": adapter.display_name,
         "address": site_model["address"],
         "latitude": lat,
         "longitude": lon,
@@ -466,19 +490,22 @@ async def run_site_pipeline(
         "site_model_url": None,
         "data_warnings": data_warnings,
         "zoning": {
-            "district": _serialise_zoning_result(zoning_result),
-            "general_plan": _serialise_gp_result(gp_result),
-            "designations": {k: _serialise_designation(v) for k, v in typed_designations.items()},
+            "district": adapter.serialize_zoning(zoning_result),
+            "general_plan": adapter.serialize_general_plan(gp_result),
+            "designations": {
+                k: adapter.serialize_designation(v) for k, v in typed_designations.items()
+            },
         },
-        "permits": _serialise_permits_result(permits_result),
-        "code_enforcement": _serialise_ce_result(ce_result),
-        "checklist": {"san_jose_checklist": checklist},
+        "permits": adapter.serialize_permits(permits_result),
+        "code_enforcement": adapter.serialize_code_enforcement(ce_result),
+        "checklist": {"items": checklist, "city": adapter.name},
         "property_stats": property_stats,
         "zip_context": zip_context,
         "financing": financing,
         "stages": stages,
         "debug": {
-            "mode": "live_san_jose_address",
+            "mode": f"live_{adapter.name}_address",
+            "city": adapter.name,
             "address_input": req.address,
             "address_normalized": geocode.normalized_input,
             "address_matched": geocode.matched_address,

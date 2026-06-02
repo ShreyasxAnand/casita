@@ -25,7 +25,21 @@ Open:
 http://127.0.0.1:8010/
 ```
 
+## Tests
+
+Run the offline checklist integrity tests from the repo root:
+
+```bash
+./venv/bin/python -m unittest discover -s tests -v
+```
+
+These tests use San Jose address-labeled fixtures with synthetic zoning,
+designation, permit, and code-enforcement results. They do not call live GIS
+services.
+
 ## Sample Data
+
+See [SITE_CONTEXT.md](SITE_CONTEXT.md) for details on the bundled Alderbrook sample site.
 
 `GET /api/site` loads the bundled sample files for smoke testing:
 

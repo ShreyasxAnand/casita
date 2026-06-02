@@ -1,0 +1,445 @@
+{
+  "_meta": {
+    "bulletin": "210",
+    "updated": "2026-03-05",
+    "jurisdiction": "San José, CA",
+    "subject_to_change": true,
+    "source": "ADU Universal Checklist — Planning, Building and Code Enforcement",
+    "governing_codes": {
+      "city_standards": "Municipal Code 20.80.175",
+      "state_standards": "Municipal Code 20.80.176",
+      "jadu_deed_restriction": "Form 313",
+      "floor_area_ratio": "Chapter 20.100 Part 9",
+      "parking": "Chapter 20.90"
+    },
+    "contacts": {
+      "adu_ally": "ADU.Ally@sanjoseca.gov",
+      "phone": "408-535-3555",
+      "zoning": "ZoningQuestions@sanjoseca.gov",
+      "fire_bureau": "SJFDPermitSpecialist@sanjoseca.gov",
+      "fire_phone": "408-535-7750",
+      "building_code_compliance": "BuildingCodeCompliance@sanjoseca.gov",
+      "address_assignment": "addressing@sanjoseca.gov"
+    }
+  },
+
+  "table_20_60": {
+    "_note": "Minimum front setbacks by residential zoning district (feet). Source: Table 20-60 Residential Zoning Districts Development Standards.",
+    "R-1-8":  { "front_setback_ft": 20 },
+    "R-1-5":  { "front_setback_ft": 20 },
+    "R-1-2":  { "front_setback_ft": 30 },
+    "R-1-1":  { "front_setback_ft": 30 },
+    "R-1-RR": { "front_setback_ft": 50 },
+    "R-2":    { "front_setback_ft": 15 },
+    "R-M":    { "front_setback_ft": 10 },
+    "R-MH":   { "front_setback_ft": 15 }
+  },
+
+  "property_qualification": {
+    "_note": "All three must be true before any ADU is permissible.",
+    "must_be_in_san_jose": true,
+    "main_home_must_be_permitted": true,
+    "permitted_home_types": ["single_family", "duplex", "multifamily"],
+    "no_active_code_enforcement_violations": true
+  },
+
+  "property_designations": {
+    "_note": "Check each. A 'yes' triggers additional requirements — does not automatically block the ADU.",
+    "flood_zones": {
+      "triggering_zones": ["A", "AE", "AH", "AO"],
+      "exempt_zones": ["D", "X"],
+      "requirement_if_triggered": "Plans must comply with Bulletin #211 flood zone design requirements"
+    },
+    "geohazard_seismic": {
+      "geohazard_or_landslide": {
+        "triggered_by": ["geohazard", "landslide"],
+        "requirement": "Geologic Hazard Clearance required"
+      },
+      "liquefaction": {
+        "requirement_if_2_or_more_units": "Geologic Clearance required",
+        "unit_threshold": 2
+      }
+    },
+    "historic_property": {
+      "city_standards_requirement": "Apply simplified design standards per Municipal Code Section 20.80.175(E)",
+      "state_standards_requirement": null
+    },
+    "wildland_urban_interface": {
+      "requirement_if_in_wui_zone": "Construction must comply with all WUI Fire Conformance Policy requirements"
+    },
+    "easements": {
+      "requirement": "No construction allowed within the easement area"
+    },
+    "nonbuildable_area": {
+      "example": "Demolished swimming pool",
+      "requirement": "Submittal must include pool demolition documents or a geotechnical report and foundation design"
+    }
+  },
+
+  "lot_size_threshold_sf": 9000,
+
+  "standards_note": "City and State standards cannot be mixed. Choose one full set.",
+
+  "standards": {
+    "single_family": {
+
+      "city": {
+        "_note": "Municipal Code 20.80.175. All three ADU types (detached, attached, jadu) can coexist but only 1 ADU total (detached or attached) is allowed alongside a JADU.",
+
+        "detached": {
+          "allowed_count": 1,
+          "allowed_count_note": "1 total between detached and attached — cannot have both",
+          "min_size_sf": 150,
+          "max_size_sf": {
+            "lot_lte_9000_sf": 1000,
+            "lot_gt_9000_sf": 1200,
+            "fifty_pct_of_main_home_cap": false
+          },
+          "min_front_setback_ft": { "_ref": "table_20_60" },
+          "min_side_setback_ft": { "story_1": 0, "story_2": 4 },
+          "min_rear_setback_ft": { "story_1": 0, "story_2": 4 },
+          "max_height_ft": { "story_1": 18, "story_2": 25 },
+          "max_stories": 2,
+          "siting": {
+            "rule": "Behind main home OR at least 45 ft from front property line",
+            "min_siting_front_offset_ft": 45
+          },
+          "max_rear_yard_coverage_pct": 40,
+          "rear_yard_coverage_excludes_pools": true,
+          "min_building_separation_from_main_home_ft": 6,
+          "parking_required": false,
+          "historic_property_standard": "20.80.175(E)",
+          "owner_occupancy_required": false
+        },
+
+        "attached": {
+          "allowed_count": 1,
+          "allowed_count_note": "1 total between detached and attached — cannot have both",
+          "prohibition": "Prohibited if an existing or proposed conversion ADU is present",
+          "min_size_sf": 150,
+          "max_size_sf": {
+            "lot_lte_9000_sf": 1000,
+            "lot_gt_9000_sf": 1200,
+            "fifty_pct_of_main_home_cap": true,
+            "fifty_pct_cap_note": "May not exceed 50% of existing primary dwelling livable area"
+          },
+          "min_front_setback_ft": { "_ref": "table_20_60" },
+          "min_side_setback_ft": null,
+          "min_rear_setback_ft": null,
+          "setback_null_note": "No numeric setback; must meet minimum Building and Fire codes",
+          "max_height_ft": 25,
+          "max_stories": 2,
+          "siting": null,
+          "front_door_constraint": "Must be on a different facade than the main home's front door",
+          "parking_required": false,
+          "historic_property_standard": "20.80.175(E)",
+          "owner_occupancy_required": false
+        },
+
+        "jadu": {
+          "allowed_count": 1,
+          "min_size_sf": 150,
+          "max_size_sf": 500,
+          "must_be_within_existing_footprint": true,
+          "eligible_structures": ["existing single-family home", "attached garage", "proposed new single-family residence"],
+          "min_front_setback_ft": null,
+          "min_side_setback_ft": null,
+          "min_rear_setback_ft": null,
+          "setback_null_note": "No numeric setback; must meet minimum Building and Fire codes",
+          "max_height_ft": null,
+          "max_stories": 2,
+          "siting": null,
+          "complies_with_section": "20.80.178",
+          "deed_restriction_required": "Form 313 JADU Deed Restriction to Planning",
+          "parking_required": false,
+          "owner_occupancy_required": true,
+          "owner_occupancy_waived_if_own_sanitation": true,
+          "historic_property_standard": "20.80.175(E)"
+        }
+      },
+
+      "state": {
+        "_note": "Municipal Code 20.80.176. No historic property requirements. No siting restrictions (front setback may be encroached when necessary).",
+
+        "new_adu": {
+          "types": ["attached", "detached"],
+          "allowed_count": 1,
+          "attached_prohibited_if_conversion_adu_exists": true,
+          "min_size_sf": 150,
+          "max_size_sf": 800,
+          "min_front_setback_ft": { "_ref": "table_20_60" },
+          "front_setback_encroachment_allowed": true,
+          "front_setback_encroachment_condition": "Only if no other siting allows a minimum 800 sf ADU on the site",
+          "min_side_setback_ft": 4,
+          "min_rear_setback_ft": 4,
+          "max_height_ft": {
+            "attached": 25,
+            "detached": 18,
+            "detached_with_pitched_roof": 20
+          },
+          "max_stories": 2,
+          "siting": null,
+          "siting_note": "No restriction; front setback may be encroached if needed to fit a minimum 800 sf ADU",
+          "parking_required": false,
+          "historic_property_standard": null,
+          "owner_occupancy_required": false
+        },
+
+        "conversion": {
+          "allowed_count": 1,
+          "note": "Conversion of existing structure or space. Cannot add new floor area except for ingress/egress.",
+          "min_size_sf": 150,
+          "max_size_sf": null,
+          "ingress_egress_addition_max_sf": 150,
+          "min_front_setback_ft": null,
+          "front_setback_null_note": "No setback; up to 150 sf for ingress/egress may be added",
+          "min_side_setback_ft": null,
+          "min_rear_setback_ft": null,
+          "max_height_ft": null,
+          "max_stories": 2,
+          "siting": null,
+          "siting_note": "No restriction; front setback may be encroached if needed to fit a minimum 800 sf ADU",
+          "parking_required": false,
+          "historic_property_standard": null,
+          "owner_occupancy_required": false
+        },
+
+        "jadu": {
+          "allowed_count": 1,
+          "min_size_sf": 150,
+          "max_size_sf": 500,
+          "ingress_egress_addition_max_sf": 150,
+          "min_front_setback_ft": null,
+          "front_setback_null_note": "No setback; up to 150 sf for ingress/egress may be added",
+          "min_side_setback_ft": null,
+          "min_rear_setback_ft": null,
+          "max_height_ft": null,
+          "max_stories": 2,
+          "siting": null,
+          "siting_note": "No restriction; front setback may be encroached if needed to fit a minimum 800 sf ADU",
+          "parking_required": false,
+          "historic_property_standard": null,
+          "owner_occupancy_required": true,
+          "owner_occupancy_waived_if_own_sanitation": true
+        }
+      }
+    },
+
+    "multifamily": {
+
+      "city": {
+        "_note": "Municipal Code 20.80.175. Applies to duplex and multifamily properties.",
+
+        "detached": {
+          "allowed_count": 1,
+          "allowed_count_note": "1 total between detached and attached — cannot have both",
+          "min_size_sf": 150,
+          "max_size_sf": {
+            "lot_lte_9000_sf": {
+              "value_sf": 1000,
+              "fifty_pct_of_main_home_cap": true,
+              "fifty_pct_cap_note": "May not exceed 50% of existing primary dwelling livable area"
+            },
+            "lot_gt_9000_sf": {
+              "value_sf": 1200,
+              "fifty_pct_of_main_home_cap": false
+            }
+          },
+          "min_front_setback_ft": { "_ref": "table_20_60" },
+          "min_side_setback_ft": {
+            "story_1": 0,
+            "story_2": 4,
+            "note": "Must meet minimum Building and Fire codes"
+          },
+          "min_rear_setback_ft": {
+            "story_1": 0,
+            "story_2": 4,
+            "note": "Must meet minimum Building and Fire codes"
+          },
+          "max_height_ft": 25,
+          "max_stories": 2,
+          "siting": {
+            "rule": "Behind existing building OR at least 45 ft from front property line",
+            "min_siting_front_offset_ft": 45
+          },
+          "max_rear_yard_coverage_pct": 40,
+          "rear_yard_coverage_excludes_pools": true,
+          "min_building_separation_from_main_home_ft": 6,
+          "parking_required": false,
+          "historic_property_standard": "20.80.175(E)",
+          "owner_occupancy_required": false
+        },
+
+        "attached": {
+          "allowed_count": 1,
+          "allowed_count_note": "1 total between detached and attached — cannot have both",
+          "min_size_sf": 150,
+          "max_size_sf": {
+            "lot_lte_9000_sf": {
+              "value_sf": 1000,
+              "fifty_pct_of_main_home_cap": true,
+              "fifty_pct_cap_note": "May not exceed 50% of existing primary dwelling livable area"
+            },
+            "lot_gt_9000_sf": {
+              "value_sf": 1200,
+              "fifty_pct_of_main_home_cap": true,
+              "fifty_pct_cap_note": "May not exceed 50% of existing primary dwelling livable area"
+            }
+          },
+          "min_front_setback_ft": { "_ref": "table_20_60" },
+          "min_side_setback_ft": { "value": 0, "note": "Must meet minimum Building and Fire codes" },
+          "min_rear_setback_ft": { "value": 0, "note": "Must meet minimum Building and Fire codes" },
+          "max_height_ft": 25,
+          "max_stories": 2,
+          "siting": null,
+          "siting_null_note": "Must meet minimum Building and Fire codes",
+          "front_door_constraint": "Must be on a different facade than the main home's front door",
+          "parking_required": false,
+          "historic_property_standard": "20.80.175(E)",
+          "owner_occupancy_required": false
+        }
+      },
+
+      "state": {
+        "_note": "Municipal Code 20.80.176. No historic property requirements.",
+
+        "detached": {
+          "allowed_count": {
+            "existing_dwelling": {
+              "max": 8,
+              "constraint": "No more than the number of existing primary units on the property",
+              "units_must_be_detached_from_primary": true
+            },
+            "new_proposed_dwelling": {
+              "max": 2,
+              "units_must_be_detached_from_primary": true
+            }
+          },
+          "min_size_sf": 150,
+          "max_size_sf": 800,
+          "min_front_setback_ft": { "_ref": "table_20_60" },
+          "front_setback_encroachment_allowed": true,
+          "front_setback_encroachment_condition": "Only if no other siting allows a minimum 800 sf ADU on the site",
+          "min_side_setback_ft": 4,
+          "min_rear_setback_ft": 4,
+          "max_height_ft": 18,
+          "max_height_with_pitched_roof_ft": 20,
+          "max_stories": 2,
+          "siting": null,
+          "siting_note": "No restriction; front setback may be encroached if needed",
+          "parking_required": false,
+          "historic_property_standard": null,
+          "owner_occupancy_required": false
+        },
+
+        "conversion": {
+          "allowed_count": {
+            "minimum": 1,
+            "maximum_pct_of_existing_units": 25,
+            "note": "At least 1 always allowed; up to 25% of existing units (e.g. 20-unit building → up to 4 ADUs)",
+            "eligible_spaces": ["attic", "basement", "boiler_room", "garage", "passageway", "storage_room"]
+          },
+          "min_size_sf": 150,
+          "max_size_sf": null,
+          "min_front_setback_ft": null,
+          "setback_null_note": "No setback requirement; must meet Building and Fire codes",
+          "min_side_setback_ft": null,
+          "min_rear_setback_ft": null,
+          "max_height_ft": 18,
+          "max_height_with_pitched_roof_ft": 20,
+          "max_stories": 2,
+          "siting": null,
+          "siting_note": "No restriction; front setback may be encroached if needed",
+          "parking_required": false,
+          "historic_property_standard": null,
+          "owner_occupancy_required": false
+        }
+      }
+    }
+  },
+
+  "fire_safety": {
+    "address_must_be_visible_from_street": true,
+    "address_form": "Form #302 — Address Assignment Request",
+    "max_access_path_ft": 150,
+    "min_access_path_width_ft": 4,
+    "access_measured_to": "Farthest side of ADU including eaves",
+    "max_hydrant_distance_ft": 600,
+    "hydrant_distance_measured_from": "Farthest exterior wall of ADU",
+    "hydrant_distance_measured_along": "Minimum 4 ft clear path",
+    "min_water_flow_gpm": 1000,
+    "min_water_pressure_psi": 20,
+    "water_flow_letter_required_at_submittal": true,
+    "water_flow_letter_note": "Submit water company letter with permit application. Do not wait — missing this is a leading cause of permit delays.",
+    "sprinklers": {
+      "required_if_main_home_has_sprinklers": true,
+      "attached_adu_whole_structure_trigger": {
+        "adu_must_exceed_sf": 500,
+        "total_gross_floor_area_must_exceed_sf": 3600,
+        "result": "Entire structure (house + ADU) must be fire-sprinklered"
+      }
+    }
+  },
+
+  "miscellaneous": {
+    "heritage_tree_removal": {
+      "permit_required": true,
+      "permit_url": "https://www.sanjoseca.gov/TreePermit"
+    },
+    "impact_fees": {
+      "threshold_sf": 750,
+      "fee_types": ["school", "parkland"],
+      "applies_to_adu_at_or_above_threshold": true,
+      "does_not_apply_below_threshold": true,
+      "permit_blocked_until_paid": true,
+      "school_fee_referral_form_provided_at_submittal": true
+    }
+  },
+
+  "square_footage_measurement": {
+    "basis": "Livable floor space measured to the exterior finish",
+    "applies_to": ["main_home", "adu"],
+    "excluded_from_main_home_sf": ["garage", "unfinished_attic", "unfinished_basement"],
+    "stairwells": {
+      "counted_once_toward_far": true,
+      "applies_to_stories": [1, 2]
+    }
+  },
+
+  "computed_helpers": {
+    "_note": "Helper logic for a modeler — derive these values programmatically.",
+    "get_max_adu_size_sf": {
+      "description": "Returns the maximum allowable ADU size in sf given inputs",
+      "inputs": ["property_type", "standards", "adu_type", "lot_size_sf", "main_home_livable_sf"],
+      "logic": [
+        "Look up standards[property_type][standards][adu_type].max_size_sf",
+        "If fifty_pct_of_main_home_cap is true, also compute 0.5 * main_home_livable_sf",
+        "Return the lesser of the two values (or the absolute cap if no 50% cap applies)"
+      ]
+    },
+    "get_front_setback_ft": {
+      "description": "Returns minimum front setback in feet for a given zone",
+      "inputs": ["zone"],
+      "logic": "Look up table_20_60[zone].front_setback_ft"
+    },
+    "get_allowed_adu_count": {
+      "description": "Returns max number of ADUs allowed",
+      "inputs": ["property_type", "standards", "adu_type", "existing_unit_count"],
+      "logic": [
+        "For MF State detached: min(8, existing_unit_count) for existing dwelling; 2 for new dwelling",
+        "For MF State conversion: max(1, floor(existing_unit_count * 0.25))",
+        "For all others: 1"
+      ]
+    },
+    "check_impact_fees": {
+      "description": "Returns whether impact fees apply",
+      "inputs": ["proposed_adu_size_sf"],
+      "logic": "proposed_adu_size_sf >= miscellaneous.impact_fees.threshold_sf"
+    },
+    "check_whole_structure_sprinklers": {
+      "description": "Returns whether entire structure must be sprinklered",
+      "inputs": ["adu_type", "adu_size_sf", "total_floor_area_sf"],
+      "logic": "adu_type === 'attached' && adu_size_sf > 500 && total_floor_area_sf > 3600"
+    }
+  }
+}

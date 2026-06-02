@@ -88,9 +88,8 @@ def get_property_by_address(address: str) -> dict[str, Any] | None:
     """Fetch a single subject property from Realtor.com via HomeHarvest."""
     try:
         from homeharvest import scrape_property  # type: ignore[import]
-    except ImportError:
-        logger.error("homeharvest not installed. Run: pip install homeharvest")
-        return None
+    except ImportError as exc:
+        raise RuntimeError("homeharvest not installed. Run: pip install homeharvest") from exc
 
     for location in _address_search_variants(address):
         try:
@@ -116,9 +115,8 @@ def search_properties_by_zip(zip_code: str, limit: int = 50) -> list[dict[str, A
         return []
     try:
         from homeharvest import scrape_property  # type: ignore[import]
-    except ImportError:
-        logger.error("homeharvest not installed.")
-        return []
+    except ImportError as exc:
+        raise RuntimeError("homeharvest not installed. Run: pip install homeharvest") from exc
     try:
         df = scrape_property(location=zip_code, listing_type=None, limit=limit)
         if df is None or df.empty:
@@ -126,7 +124,7 @@ def search_properties_by_zip(zip_code: str, limit: int = 50) -> list[dict[str, A
         return df.to_dict(orient="records")
     except Exception as exc:
         logger.error("HomeHarvest zip search failed for %s: %s", zip_code, exc)
-        return []
+        raise
 
 
 # ── Mapping helpers ──────────────────────────────────────────────────────────

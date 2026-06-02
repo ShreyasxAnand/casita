@@ -22,8 +22,8 @@ from fastapi import HTTPException
 from shapely.errors import GEOSException
 from shapely.geometry import mapping, shape
 
-from app.clients.arcgis_geometry import feature_to_geojson
 from app.services import arcgis
+from app.services.arcgis_geometry import feature_to_geojson
 
 logger = logging.getLogger(__name__)
 
@@ -54,37 +54,12 @@ async def _query_layer(
     )
 
 
-async def fetch_buildings_for_parcel(
-    client: httpx.AsyncClient,
-    parcel_feature: dict[str, Any],
-) -> tuple[dict[str, Any], str]:
-    """Return building outlines that intersect the parcel, plus a source tag.
-
-    Source tag is one of:
-      - `san_jose_dpw`: primary layer succeeded with >=1 intersecting building.
-      - `scc_fallback`: primary failed; SCC LiDAR-derived layer was used.
-      - `not_found`: both layers returned no features intersecting the parcel.
-    """
-    parcel_geom = shape(parcel_feature["geometry"]).buffer(0)
-    west, south, east, north = parcel_geom.bounds
-
-    primary_source = "san_jose_dpw"
-    try:
-        raw = await _query_layer(client, SAN_JOSE_BUILDINGS_QUERY_URL, west, south, east, north)
-    except HTTPException as exc:
-        logger.warning("San Jose DPW building layer failed: %s", exc.detail)
-        raw = []
-        primary_source = "scc_fallback"
-
-    if not raw and primary_source == "scc_fallback":
-        try:
-            raw = await _query_layer(client, SCC_BUILDINGS_QUERY_URL, west, south, east, north)
-        except HTTPException as exc:
-            logger.warning("SCC building layer failed: %s", exc.detail)
-            raw = []
-
+def _features_intersecting_parcel(
+    raw_features: list[dict[str, Any]],
+    parcel_geom,
+) -> list[dict[str, Any]]:
     features: list[dict[str, Any]] = []
-    for raw_feature in raw:
+    for raw_feature in raw_features:
         feature = feature_to_geojson(raw_feature)
         if not feature:
             continue
@@ -98,7 +73,44 @@ async def fetch_buildings_for_parcel(
         clipped = building_geom.intersection(parcel_geom).buffer(0)
         feature["geometry"] = mapping(clipped)
         features.append(feature)
+    return features
 
-    if not features:
-        return _feature_collection([]), "not_found"
-    return _feature_collection(features), primary_source
+
+async def fetch_buildings_for_parcel(
+    client: httpx.AsyncClient,
+    parcel_feature: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Return building outlines that intersect the parcel, plus a source tag.
+
+    Source tag is one of:
+      - `san_jose_dpw`: primary layer succeeded with >=1 intersecting building.
+      - `scc_fallback`: primary failed or had no parcel-intersecting features;
+        SCC LiDAR-derived layer was used.
+      - `not_found`: both layers returned no features intersecting the parcel.
+    """
+    parcel_geom = shape(parcel_feature["geometry"]).buffer(0)
+    west, south, east, north = parcel_geom.bounds
+
+    try:
+        raw = await _query_layer(client, SAN_JOSE_BUILDINGS_QUERY_URL, west, south, east, north)
+    except HTTPException as exc:
+        logger.warning("San Jose DPW building layer failed: %s", exc.detail)
+        raw = []
+
+    features = _features_intersecting_parcel(raw, parcel_geom)
+    if features:
+        return _feature_collection(features), "san_jose_dpw"
+
+    # DPW sometimes responds successfully but lacks a footprint for a parcel.
+    # Try SCC before declaring "not found"; otherwise the setback model can
+    # overstate usable yard area by omitting the primary residence.
+    try:
+        raw = await _query_layer(client, SCC_BUILDINGS_QUERY_URL, west, south, east, north)
+    except HTTPException as exc:
+        logger.warning("SCC building layer failed: %s", exc.detail)
+        raw = []
+
+    features = _features_intersecting_parcel(raw, parcel_geom)
+    if features:
+        return _feature_collection(features), "scc_fallback"
+    return _feature_collection([]), "not_found"

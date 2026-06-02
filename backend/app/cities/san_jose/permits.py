@@ -57,7 +57,7 @@ def _ms_to_date(ms: Any) -> str | None:
         return None
     try:
         return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-    except Exception:
+    except (ValueError, TypeError, OSError, OverflowError):
         return None
 
 
