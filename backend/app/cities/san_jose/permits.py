@@ -4,11 +4,14 @@ Queries layer 8 (Active Building Permit) and layer 9 (Expired Building Permit)
 by APN to surface permit history for two checklist questions:
   - Q2: Is the main home permitted? — finalized permits are strong evidence.
   - Q9: Demolished pool? — any permit mentioning "pool", "swimming", or "spa".
+
+The contractor heatmap also uses this module for live ADU/JADU permit lookups
+on a selected APN.
 """
 from __future__ import annotations
 
 import asyncio
-import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -19,8 +22,6 @@ from fastapi import HTTPException
 from app.result import FetchResult
 from app.services import arcgis
 
-logger = logging.getLogger(__name__)
-
 _BASE = (
     "https://geo.sanjoseca.gov/server/rest/services/"
     "PLN/PLN_PermitsAndComplaints/MapServer"
@@ -29,8 +30,27 @@ _ACTIVE_URL = f"{_BASE}/8/query"
 _EXPIRED_URL = f"{_BASE}/9/query"
 
 _OUT_FIELDS = "FOLDERNUM,WORKDESC,SUBDESC,PERMITAPPROVAL,ISSUEDATE,FINALDATE,ADDRESS,APN"
+_ADU_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\ba\s*\.?\s*d\s*\.?\s*u\.?s?\b",
+        r"\bj\s*\.?\s*a\s*\.?\s*d\s*\.?\s*u\.?s?\b",
+        r"\baccessory\s+dwelling\b",
+        r"\baccessory\s+living\b",
+        r"\bjunior\s+accessory\s+dwelling\b",
+        r"\bsecond\s+unit\b",
+        r"\b2nd\s+unit\b",
+        r"\bgranny\s+unit\b",
+        r"\bin-?law\s+unit\b",
+    )
+)
 _POOL_KEYWORDS = frozenset({"pool", "swimming", "spa", "jacuzzi"})
 _SRC = "San Jose PLN_PermitsAndComplaints MapServer layers 8+9"
+
+
+def normalize_apn(value: Any) -> str:
+    """Return the alphanumeric APN form used by San Jose permit layers."""
+    return "".join(ch for ch in str(value or "") if ch.isalnum()).upper()
 
 
 @dataclass
@@ -77,6 +97,16 @@ def _is_pool(r: PermitRecord) -> bool:
     return any(kw in text for kw in _POOL_KEYWORDS)
 
 
+def is_adu_permit_text(work_desc: Any, sub_desc: Any = "") -> bool:
+    """Return True when permit description fields indicate an ADU/JADU permit."""
+    text = f"{work_desc or ''} {sub_desc or ''}"
+    return any(pattern.search(text) for pattern in _ADU_PATTERNS)
+
+
+def is_adu_permit_record(record: PermitRecord) -> bool:
+    return is_adu_permit_text(record.work_desc, record.sub_desc)
+
+
 async def _query_layer(
     client: httpx.AsyncClient,
     url: str,
@@ -85,10 +115,14 @@ async def _query_layer(
     *,
     stage: str,
 ) -> list[PermitRecord]:
+    clean_apn = normalize_apn(apn)
+    if not clean_apn:
+        return []
     params = {
-        "where": f"APN = '{apn}'",
+        "where": f"APN = '{clean_apn}'",
         "outFields": _OUT_FIELDS,
         "returnGeometry": "false",
+        "resultRecordCount": "2000",
         "f": "json",
     }
     data = await arcgis.fetch_json(client, url, params, stage=stage)
@@ -102,12 +136,17 @@ async def fetch_permits(
     client: httpx.AsyncClient,
     apn: str,
 ) -> FetchResult[PermitsData]:
-    if not apn:
+    clean_apn = normalize_apn(apn)
+    if not clean_apn:
         return FetchResult.failed("No APN available", _SRC)
     try:
         active, expired = await asyncio.gather(
-            _query_layer(client, _ACTIVE_URL, apn, "active", stage="active permits"),
-            _query_layer(client, _EXPIRED_URL, apn, "expired", stage="expired permits"),
+            _query_layer(
+                client, _ACTIVE_URL, clean_apn, "active", stage="active permits",
+            ),
+            _query_layer(
+                client, _EXPIRED_URL, clean_apn, "expired", stage="expired permits",
+            ),
         )
     except HTTPException as exc:
         return FetchResult.failed(exc.detail, _SRC)
@@ -129,3 +168,29 @@ async def fetch_permits(
         ),
         _SRC,
     )
+
+
+async def fetch_adu_permits(
+    client: httpx.AsyncClient,
+    apn: str,
+) -> FetchResult[list[PermitRecord]]:
+    """Fetch live permit records for one APN and return only ADU/JADU matches."""
+    clean_apn = normalize_apn(apn)
+    if not clean_apn:
+        return FetchResult.failed("No APN available", _SRC)
+    try:
+        active, expired = await asyncio.gather(
+            _query_layer(
+                client, _ACTIVE_URL, clean_apn, "active", stage="active ADU permits",
+            ),
+            _query_layer(
+                client, _EXPIRED_URL, clean_apn, "expired", stage="expired ADU permits",
+            ),
+        )
+    except HTTPException as exc:
+        return FetchResult.failed(exc.detail, _SRC)
+
+    adu_records = [record for record in active + expired if is_adu_permit_record(record)]
+    if not adu_records:
+        return FetchResult.absent(_SRC)
+    return FetchResult.ok(adu_records, _SRC)

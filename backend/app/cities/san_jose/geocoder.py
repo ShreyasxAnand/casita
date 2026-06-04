@@ -16,6 +16,7 @@ __all__ = [
     "GEOCODE_MIN_SCORE",
     "GeocodeResult",
     "geocode_san_jose_address",
+    "geocode_zip_extent",
     "normalize_address",
 ]
 
@@ -54,6 +55,79 @@ def normalize_address(address: str) -> str:
     elif " ca" not in lower and "california" not in lower:
         value = f"{value}, CA"
     return value
+
+
+async def geocode_zip_extent(
+    client: httpx.AsyncClient,
+    zip_code: str,
+) -> dict[str, float | str]:
+    """Resolve a 5-digit ZIP to its bounding extent and centre.
+
+    Returns ``{zip, center_lat, center_lon, west, south, east, north}``.
+    Raises 422 for a malformed ZIP and 404 for a ZIP whose centroid does not
+    fall inside San Jose bounds (the parcel service only covers San Jose).
+    """
+    zip_clean = (zip_code or "").strip()
+    if not (len(zip_clean) == 5 and zip_clean.isdigit()):
+        raise HTTPException(422, "Enter a valid 5-digit ZIP code.")
+
+    data = await fetch_json(
+        client,
+        ARCGIS_GEOCODER_URL,
+        {
+            "Postal": zip_clean,
+            "Region": "CA",
+            "f": "json",
+            "outFields": "Postal,City,Region",
+            "maxLocations": 5,
+            "sourceCountry": "USA",
+        },
+        stage="geocoder_zip",
+    )
+
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise HTTPException(404, f"Could not locate ZIP {zip_clean}.")
+
+    selected = None
+    for candidate in candidates:
+        attrs = candidate.get("attributes") or {}
+        postal = str(attrs.get("Postal") or "").strip()
+        region = str(attrs.get("Region") or "").strip().upper()
+        location = candidate.get("location") or {}
+        cx, cy = location.get("x"), location.get("y")
+        extent = candidate.get("extent") or {}
+        if cx is None or cy is None or not extent:
+            continue
+        if postal and postal != zip_clean:
+            continue
+        if region and region not in ("CA", "CALIFORNIA"):
+            continue
+        if _inside_bbox(float(cx), float(cy)):
+            selected = candidate
+            break
+
+    if selected is None:
+        raise HTTPException(
+            404,
+            f"ZIP {zip_clean} is outside San Jose coverage. "
+            "This heatmap currently scores San Jose parcels only.",
+        )
+
+    location = selected["location"]
+    extent = selected["extent"]
+    cx, cy = location["x"], location["y"]
+    center_lon, center_lat = float(cx), float(cy)
+
+    return {
+        "zip": zip_clean,
+        "center_lat": center_lat,
+        "center_lon": center_lon,
+        "west": float(extent["xmin"]),
+        "south": float(extent["ymin"]),
+        "east": float(extent["xmax"]),
+        "north": float(extent["ymax"]),
+    }
 
 
 async def geocode_san_jose_address(

@@ -62,6 +62,10 @@ _ZONING_FULL_NAMES: dict[str, str] = {
     "CG": "Commercial General",
     "CN": "Commercial Neighborhood",
     "DC": "Downtown Primary Commercial",
+    # Mixed-use zones that permit residential (CA §66310-eligible)
+    "MU-N": "Mixed Use Neighborhood",
+    "MU-C": "Mixed Use Community",
+    "DC-NT": "Downtown Neighborhood Transition",
 }
 
 _ELIGIBLE_GP_TOKENS = (
@@ -75,11 +79,59 @@ _ELIGIBLE_GP_TOKENS = (
     "MIXED-USE COMMERCIAL",
 )
 
+SAN_JOSE_ADU_PAGE_URL = (
+    "https://www.sanjoseca.gov/business/development-services-permit-center/"
+    "accessory-dwelling-units-adus"
+)
+SAN_JOSE_MUNICIPAL_CODE_URL = (
+    "https://library.municode.com/ca/san_jose/codes/code_of_ordinances"
+)
+
 
 def zoning_full_name(zoning_code: str) -> str:
     """Return the human-readable name for a San Jose zoning code."""
     base = (zoning_code or "").split("(")[0]
     return _ZONING_FULL_NAMES.get(base, zoning_code or "Unknown")
+
+
+def zoning_ordinance_reference(
+    zoning_code: str,
+    zoning_name: str,
+) -> dict[str, Any]:
+    """Return the ordinance references relevant to a heatmap lead's zone."""
+    code = (zoning_code or "").strip().upper()
+    zone_label = zoning_name or zoning_full_name(code)
+    if code.startswith(("R-1", "R-2", "R-M", "R-MH")):
+        zoning_standard = "Chapter 20.30 Residential Zoning Districts, Table 20-60"
+    elif code.startswith("PD") or "(PD)" in code:
+        zoning_standard = (
+            "Planned Development zoning standards, plus the residential ADU sections"
+        )
+    elif code.startswith(("MU", "DC")):
+        zoning_standard = (
+            "Mixed-use/Downtown zoning standards; ADU permitted where residential use is allowed "
+            "(CA Gov. Code §66310)"
+        )
+    else:
+        zoning_standard = "Applicable Title 20 zoning district standards"
+
+    return {
+        "jurisdiction": "City of San Jose",
+        "zoning_code": code,
+        "zoning_name": zone_label,
+        "title": "San Jose Municipal Code Title 20 - Zoning",
+        "zoning_standard": zoning_standard,
+        "adu_sections": [
+            "20.80.175 General ADU standards",
+            "20.80.176 Streamlined/state-standard ADU approval",
+        ],
+        "summary": (
+            f"{code or 'Unknown zoning'} ({zone_label}) should be checked against "
+            f"{zoning_standard}; ADU review uses SJMC 20.80.175 and 20.80.176."
+        ),
+        "code_url": SAN_JOSE_MUNICIPAL_CODE_URL,
+        "adu_url": SAN_JOSE_ADU_PAGE_URL,
+    }
 
 
 def adu_eligibility(

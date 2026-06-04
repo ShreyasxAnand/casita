@@ -92,6 +92,16 @@
       houseEditBtn: document.getElementById('houseEditBtn'),
       houseHelp: document.getElementById('houseHelp'),
       helpHint: document.getElementById('helpHint'),
+      // Add Plans (manual plan library)
+      addPlansBtn: document.getElementById('addPlansBtn'),
+      stepAddPlans: document.getElementById('stepAddPlans'),
+      addPlansCloseBtn: document.getElementById('addPlansCloseBtn'),
+      addPlanForm: document.getElementById('addPlanForm'),
+      addPlanError: document.getElementById('addPlanError'),
+      addPlanSubmit: document.getElementById('addPlanSubmit'),
+      addPlansList: document.getElementById('addPlansList'),
+      addPlansEmpty: document.getElementById('addPlansEmpty'),
+      addPlansCityFilter: document.getElementById('addPlansCityFilter'),
     };
 
     let renderer, scene, camera, controls, raycaster, sun;
@@ -143,6 +153,7 @@
     let real3dFloorHeightM = NaN;
     let real3dFloorReady = false;
     let real3dFloorSampleInFlight = false;
+
     let real3dPreviewLocked = false;
     let real3dGpuFallback = false;
     // The parcel floor estimate is one number for the whole parcel. To keep
@@ -183,9 +194,19 @@
     const PC = (typeof window !== 'undefined' && window.polygonClipping) ? window.polygonClipping : null;
     if (!PC) debugWarn('polygon-clipping library failed to load — buildable-zone recompute will be skipped.');
 
+    let serverGoogleTilesKey = '';
+
     initThree();
     els.googleTilesKey.value = localStorage.getItem('aduMvpGoogleTilesKey') || '';
     setStatus('Enter an address and click Load Site to begin.', '');
+
+    fetch('/api/config').then(r => r.json()).then(cfg => {
+      if (cfg.google_tiles_key) {
+        serverGoogleTilesKey = cfg.google_tiles_key;
+        const keyRow = els.googleTilesKey.closest('div');
+        if (keyRow) keyRow.hidden = true;
+      }
+    }).catch(() => {});
 
     function setStatus(text, state = '') {
       els.statusDot.className = 'dot ' + state;
@@ -209,8 +230,11 @@
       return data;
     }
 
-    async function loadSite({ keepFrontEdge = false } = {}) {
-      if (!els.address.value.trim()) {
+    async function loadSite({ keepFrontEdge = false, lead = null } = {}) {
+      const leadLat = lead && Number.isFinite(Number(lead.latitude)) ? Number(lead.latitude) : null;
+      const leadLon = lead && Number.isFinite(Number(lead.longitude)) ? Number(lead.longitude) : null;
+      const addressInput = els.address.value.trim();
+      if (!addressInput && (leadLat == null || leadLon == null)) {
         setStatus('Enter an address to get started.', '');
         return;
       }
@@ -222,9 +246,9 @@
         els.stageLog.innerHTML = '<div class="stage-log-loading"><span class="stage-log-spinner"></span><span>Analyzing property…</span></div>';
       }
       try {
-        const data = await postJson('/api/site', {
-          city: getSelectedCity(),
-          address: els.address.value.trim(),
+        const siteRequest = {
+          city: lead ? 'san_jose' : getSelectedCity(),
+          address: addressInput || lead?.address || '',
           include_checklist: true,
           standards: standardsVal,
           adu_type: aduTypeVal,
@@ -233,7 +257,12 @@
           adu_depth_ft: Number(els.aduDepth.value) || 40,
           adu_height_ft: Number(els.sidebarHeight?.value || els.height?.value) || 16,
           front_edge_index: selectedFrontEdgeIdx,
-        });
+        };
+        if (leadLat != null && leadLon != null) {
+          siteRequest.latitude = leadLat;
+          siteRequest.longitude = leadLon;
+        }
+        const data = await postJson('/api/site', siteRequest);
         siteModel = data.site_model;
         propertyStats = data.property_stats || null;
         zipContext = data.zip_context || null;
@@ -2073,6 +2102,14 @@
       })[ch]);
     }
 
+    function externalLinkHtml(url, label) {
+      const href = String(url || '');
+      if (!/^https?:\/\//i.test(href)) return '';
+      return '<a class="lead-source-link" href="' + escapeHtml(href) + '" target="_blank" rel="noopener noreferrer">' +
+        escapeHtml(label) +
+      '</a>';
+    }
+
     function ensureUtmProjection() {
       if (!window.proj4) return false;
       if (!window.proj4.defs('EPSG:26910')) {
@@ -2389,7 +2426,7 @@
     }
 
     function getGoogleTilesKey() {
-      return (els.googleTilesKey.value || '').trim();
+      return serverGoogleTilesKey || (els.googleTilesKey.value || '').trim();
     }
 
     function setReal3dStatus(text, isError = false) {
@@ -3456,6 +3493,20 @@
       }
     }
 
+    function hideLandingOverlayForTool() {
+      const el = document.getElementById('landingOverlay');
+      if (!el) return;
+      el.classList.add('is-dismissed');
+      el.setAttribute('aria-hidden', 'true');
+    }
+
+    function showLandingOverlayFromTool() {
+      const el = document.getElementById('landingOverlay');
+      if (!el) return;
+      el.classList.remove('is-dismissed');
+      el.removeAttribute('aria-hidden');
+    }
+
     function startFromLanding() {
       const landingInput = document.getElementById('landingAddress');
       if (!landingInput) return;
@@ -3479,6 +3530,18 @@
     });
     els.modelTab.addEventListener('click', () => showTab('model'));
     els.real3dTab.addEventListener('click', () => showTab('real3d'));
+
+
+    // Add Plans listeners
+    els.addPlansBtn?.addEventListener('click', openAddPlans);
+    els.addPlansCloseBtn?.addEventListener('click', closeAddPlans);
+    els.addPlanForm?.addEventListener('submit', submitAddPlan);
+    els.addPlansCityFilter?.addEventListener('click', (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      els.addPlansCityFilter.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('active', b === btn));
+      loadManualPlans(btn.dataset.city || '');
+    });
     els.loadReal3dBtn.addEventListener('click', ensureReal3dLoaded);
     els.syncReal3dBtn.addEventListener('click', syncReal3dScene);
     els.focusReal3dBtn.addEventListener('click', () => flyReal3dToSite(0.45));
@@ -4106,3 +4169,176 @@
     });
 
     readUrlState();
+
+    // ── Add Plans (manual plan library) ─────────────────────────────────────
+    // Remembers what to restore on close: a 1-based wizard step, or 'landing'.
+    let _addPlansReturnStep = null;
+
+    function openAddPlans() {
+      const landing = document.getElementById('landingOverlay');
+      const onLanding = landing && !landing.classList.contains('is-dismissed');
+      if (onLanding) {
+        _addPlansReturnStep = 'landing';
+      } else {
+        // Capture the wizard step currently on screen (1-based), default to 1.
+        const idx = WIZARD_STEP_IDS.findIndex(id => {
+          const el = document.getElementById(id);
+          return el && !el.hidden;
+        });
+        _addPlansReturnStep = idx >= 0 ? idx + 1 : 1;
+      }
+
+      hideLandingOverlayForTool();
+      document.querySelectorAll('.wizard-step').forEach(s => s.hidden = true);
+      els.stepAddPlans.hidden = false;
+      document.getElementById('stepIndicator').hidden = true;
+      // Default the form's city to the active city when known.
+      if (els.citySelect?.value) els.addPlanForm.elements.city.value = els.citySelect.value;
+      loadManualPlans(_currentPlanCityFilter());
+    }
+
+    function closeAddPlans() {
+      els.stepAddPlans.hidden = true;
+      if (_addPlansReturnStep === 'landing' || _addPlansReturnStep == null) {
+        showLandingOverlayFromTool();
+      } else {
+        navigateWizard(_addPlansReturnStep);
+      }
+    }
+
+    function _currentPlanCityFilter() {
+      const active = els.addPlansCityFilter?.querySelector('.seg-btn.active');
+      return active ? (active.dataset.city || '') : '';
+    }
+
+    async function loadManualPlans(city) {
+      try {
+        const qs = city ? `?city=${encodeURIComponent(city)}` : '';
+        const res = await fetch(`/api/plans${qs}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderManualPlans(data.plans || []);
+      } catch (err) {
+        els.addPlansList.innerHTML =
+          `<div class="apf-error" style="display:block">Could not load plans: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    const CITY_LABELS = { san_jose: 'San Jose', sf: 'San Francisco', oakland: 'Oakland' };
+
+    function renderManualPlans(plans) {
+      if (!plans.length) {
+        els.addPlansList.innerHTML = '';
+        els.addPlansEmpty.hidden = false;
+        return;
+      }
+      els.addPlansEmpty.hidden = true;
+
+      els.addPlansList.innerHTML = plans.map(p => {
+        const dims = (p.width_ft && p.depth_ft) ? `${p.width_ft}′ × ${p.depth_ft}′` : null;
+        const beds = p.bedrooms == null ? null : (p.bedrooms === 0 ? 'Studio' : `${p.bedrooms} bd`);
+        const chips = [
+          `${Number(p.sqft).toLocaleString()} sqft`,
+          beds, dims,
+        ].filter(Boolean).map(c => `<span class="plan-chip">${escapeHtml(c)}</span>`).join('');
+
+        const media = p.image_url
+          ? `<img class="apc-media" src="${escapeHtml(p.image_url)}" alt="${escapeHtml(p.name)} render" loading="lazy">`
+          : `<div class="apc-media apc-media-empty" aria-hidden="true">
+               <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+             </div>`;
+
+        const links = [];
+        if (p.floor_plan_url) links.push(`<a href="${escapeHtml(p.floor_plan_url)}" target="_blank" rel="noopener" class="apc-link">Floor plan</a>`);
+        if (p.url) links.push(`<a href="${escapeHtml(p.url)}" target="_blank" rel="noopener" class="apc-link">Source</a>`);
+
+        return `
+          <div class="apc-card" data-id="${escapeHtml(p.id)}">
+            ${media}
+            <div class="apc-body">
+              <div class="apc-top">
+                <span class="apc-city">${escapeHtml(CITY_LABELS[p.city] || p.city)}</span>
+                <button type="button" class="apc-delete" data-id="${escapeHtml(p.id)}" aria-label="Delete ${escapeHtml(p.name)}">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                </button>
+              </div>
+              <div class="apc-name">${escapeHtml(p.name)}</div>
+              ${p.vendor ? `<div class="apc-vendor">${escapeHtml(p.vendor)}</div>` : ''}
+              <div class="apc-chips">${chips}</div>
+              ${links.length ? `<div class="apc-links">${links.join('')}</div>` : ''}
+            </div>
+          </div>`;
+      }).join('');
+
+      els.addPlansList.querySelectorAll('.apc-delete').forEach(btn => {
+        btn.addEventListener('click', () => deleteManualPlan(btn.dataset.id));
+      });
+    }
+
+    async function deleteManualPlan(id) {
+      if (!confirm('Delete this plan? This cannot be undone.')) return;
+      try {
+        const res = await fetch(`/api/plans/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        loadManualPlans(_currentPlanCityFilter());
+      } catch (err) {
+        alert(`Could not delete plan: ${err.message}`);
+      }
+    }
+
+    async function submitAddPlan(e) {
+      e.preventDefault();
+      els.addPlanError.hidden = true;
+      const form = els.addPlanForm;
+      if (!form.reportValidity()) return;
+
+      els.addPlanSubmit.disabled = true;
+      els.addPlanSubmit.textContent = 'Adding…';
+      try {
+        // FormData omits empty file inputs cleanly and carries multipart files.
+        const fd = new FormData(form);
+        // Drop blank optional fields so the server sees them as absent.
+        for (const key of ['vendor', 'bedrooms', 'bathrooms', 'width_ft', 'depth_ft', 'url']) {
+          if (!fd.get(key)) fd.delete(key);
+        }
+        for (const key of ['image', 'floor_plan']) {
+          const f = fd.get(key);
+          if (f && (!(f instanceof File) || f.size === 0)) fd.delete(key);
+        }
+        const res = await fetch('/api/plans', { method: 'POST', body: fd });
+        if (!res.ok) {
+          const detail = await res.json().catch(() => ({}));
+          throw new Error(_formatPlanError(detail));
+        }
+        const record = await res.json();
+        form.reset();
+        if (els.citySelect?.value) form.elements.city.value = els.citySelect.value;
+        // Switch the filter to show the city we just added to.
+        _focusPlanFilter(record.city);
+        loadManualPlans(record.city);
+      } catch (err) {
+        els.addPlanError.textContent = err.message || 'Could not add plan.';
+        els.addPlanError.hidden = false;
+      } finally {
+        els.addPlanSubmit.disabled = false;
+        els.addPlanSubmit.textContent = 'Add plan';
+      }
+    }
+
+    function _focusPlanFilter(city) {
+      const buttons = els.addPlansCityFilter?.querySelectorAll('.seg-btn') || [];
+      buttons.forEach(b => b.classList.toggle('active', (b.dataset.city || '') === city));
+    }
+
+    function _formatPlanError(detail) {
+      // FastAPI returns {detail: [...]} for validation errors, or {detail: "msg"}.
+      const d = detail.detail;
+      if (Array.isArray(d)) {
+        return d.map(e => {
+          const field = Array.isArray(e.loc) ? e.loc[e.loc.length - 1] : 'field';
+          return `${field}: ${e.msg}`;
+        }).join('; ');
+      }
+      return typeof d === 'string' ? d : 'Could not add plan.';
+    }
+

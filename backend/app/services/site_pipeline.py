@@ -135,6 +135,42 @@ async def _property_data_block(
     return property_stats, zip_context, financing, stage_entry
 
 
+async def _coordinate_property_data_block(
+    req: SiteRequest, geocode: GeocodeResult,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Return neutral property stats for map-selected parcels.
+
+    Heatmap leads come from parcel geometry/APNs, not street-address records.
+    A Realtor.com lookup for "APN 123..." is both slow and misleading, so keep
+    the downstream response shape intact with explicit "not found" stats.
+    """
+    start = time.perf_counter()
+    property_stats = build_property_stats(
+        None,
+        address=geocode.matched_address,
+        city=geocode.city,
+        state=geocode.state,
+        zip_code=geocode.zip_code,
+        latitude=geocode.latitude,
+        longitude=geocode.longitude,
+    )
+    zip_context = build_zip_context(geocode.zip_code, geocode.city, geocode.state, [])
+    financing = build_financing(
+        req.adu_width_ft,
+        req.adu_depth_ft,
+        zip_context,
+        build_cost_per_sqft=req.build_cost_per_sqft,
+        down_payment_pct=req.down_payment_pct,
+        interest_rate_pct=req.interest_rate_pct,
+        loan_term_years=req.loan_term_years,
+    )
+    return property_stats, zip_context, financing, stage(
+        "skip_property_data", start,
+        "Skipped address-based property lookup for a map-selected parcel.",
+        {"subject_found": False, "zip_listings": 0, "zip_rentals": 0, "zip_avg_rent": None},
+    )
+
+
 def _make_job_id(prefix: str, parcel_id: str | None, address: str, lat: float, lon: float) -> str:
     """Derive a stable job ID from the parcel APN (or equivalent), falling back
     to a short hash of the address + coordinates when no parcel id is available.
@@ -339,17 +375,52 @@ async def run_site_pipeline(
 
     # 1. Geocode ─────────────────────────────────────────────────────────
     start = time.perf_counter()
-    geocode = await adapter.geocode(client, req.address)
+    has_lat = req.latitude is not None
+    has_lon = req.longitude is not None
+    if has_lat != has_lon:
+        raise HTTPException(422, "Latitude and longitude must be supplied together.")
+
+    if has_lat and has_lon:
+        lat = float(req.latitude)
+        lon = float(req.longitude)
+        if not (math.isfinite(lat) and math.isfinite(lon)):
+            raise HTTPException(422, "Latitude and longitude must be finite numbers.")
+        label = req.address.strip() or f"Selected parcel ({lat:.5f}, {lon:.5f})"
+        geocode = GeocodeResult(
+            matched_address=label,
+            latitude=lat,
+            longitude=lon,
+            score=100.0,
+            normalized_input=label,
+            zip_code="",
+            city=adapter.display_name,
+            state="CA",
+        )
+        stages.append(stage(
+            "use_selected_coordinates", start,
+            f"Loaded parcel containing selected map point ({lat:.5f}, {lon:.5f}).",
+            {"latitude": lat, "longitude": lon},
+        ))
+    else:
+        geocode = await adapter.geocode(client, req.address)
+        stages.append(stage(
+            "geocode_address", start,
+            f"Matched '{geocode.matched_address}' (score {geocode.score:.0f}/100).",
+            {
+                "score": geocode.score,
+                "latitude": geocode.latitude,
+                "longitude": geocode.longitude,
+            },
+        ))
     lat, lon = geocode.latitude, geocode.longitude
     address = geocode.matched_address
-    stages.append(stage(
-        "geocode_address", start,
-        f"Matched '{geocode.matched_address}' (score {geocode.score:.0f}/100).",
-        {"score": geocode.score, "latitude": lat, "longitude": lon},
-    ))
 
     # 2. HomeHarvest (overlapped with GIS calls below) ───────────────────
-    prop_data_task = asyncio.create_task(_property_data_block(req, geocode))
+    prop_data_task = asyncio.create_task(
+        _coordinate_property_data_block(req, geocode)
+        if has_lat and has_lon
+        else _property_data_block(req, geocode)
+    )
 
     # 3. Parcel + buildings ──────────────────────────────────────────────
     start = time.perf_counter()

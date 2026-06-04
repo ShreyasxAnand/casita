@@ -12,23 +12,32 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import RedirectResponse, Response
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from pydantic import ValidationError
 from shapely.geometry import shape
 from shapely.ops import transform as shapely_transform, unary_union
 
+from app import manual_plans
 from app.cities import get_adapter, list_supported
+from app.manual_plans import ManualPlanInput
 from app.models import SiteRequest
 from app.services.arcgis import TO_UTM, TO_WGS84
 from app.services.site_pipeline import run_site_pipeline
 
 logger = logging.getLogger(__name__)
+
+limiter = Limiter(key_func=get_remote_address)
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
@@ -63,6 +72,15 @@ app = FastAPI(
     version="0.3.0",
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={"error": "rate_limit_exceeded", "detail": str(exc.detail)},
+    )
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -91,6 +109,12 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/config")
+def get_config():
+    """Expose non-secret runtime config to the frontend."""
+    return {"google_tiles_key": os.environ.get("GOOGLE_TILES_KEY", "")}
 
 
 @app.get("/api/site")
@@ -171,6 +195,97 @@ def get_cities():
 
 
 @app.post("/api/site")
-async def post_site(body: SiteRequest):
+@limiter.limit("3/minute")
+async def post_site(request: Request, body: SiteRequest):
     adapter = get_adapter(body.city)
     return await run_site_pipeline(app.state.http_client, body, adapter)
+
+
+# ── Manual plans ─────────────────────────────────────────────────────────────
+
+# Accepted upload types and size cap for plan images / floor plans.
+_ALLOWED_UPLOAD_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "application/pdf": ".pdf",
+}
+_MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+async def _save_upload(file: UploadFile | None) -> str | None:
+    """Persist an uploaded file to the plans static dir; return its public URL.
+
+    Returns ``None`` for an empty field. Rejects disallowed types and
+    oversized files so a bad upload fails loudly rather than being stored.
+    """
+    if file is None or not file.filename:
+        return None
+
+    ext = _ALLOWED_UPLOAD_TYPES.get(file.content_type or "")
+    if ext is None:
+        raise HTTPException(
+            400, f"Unsupported file type {file.content_type!r}; "
+                 "use JPEG, PNG, WebP, GIF, or PDF.",
+        )
+
+    data = await file.read()
+    if len(data) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "File exceeds the 10 MB limit.")
+
+    manual_plans.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"{uuid.uuid4().hex}{ext}"
+    (manual_plans.UPLOAD_DIR / name).write_bytes(data)
+    return f"{manual_plans.UPLOAD_URL_PREFIX}/{name}"
+
+
+@app.get("/api/plans")
+def get_plans(city: str | None = Query(None)):
+    """List user-authored plans, optionally filtered by city."""
+    return {"plans": manual_plans.list_plans(city)}
+
+
+@app.post("/api/plans")
+async def create_plan(
+    name: str = Form(...),
+    city: str = Form(...),
+    sqft: int = Form(...),
+    adu_type: str = Form("detached"),
+    vendor: str | None = Form(None),
+    bedrooms: int | None = Form(None),
+    bathrooms: int | None = Form(None),
+    width_ft: float | None = Form(None),
+    depth_ft: float | None = Form(None),
+    url: str | None = Form(None),
+    image: UploadFile | None = File(None),
+    floor_plan: UploadFile | None = File(None),
+):
+    """Create a plan from a multipart form with optional image + floor-plan uploads."""
+    # Treat blank optional strings as omitted so they validate as None.
+    vendor = vendor or None
+    url = url or None
+    try:
+        plan_input = ManualPlanInput(
+            name=name, city=city, sqft=sqft, adu_type=adu_type, vendor=vendor,
+            bedrooms=bedrooms, bathrooms=bathrooms,
+            width_ft=width_ft, depth_ft=depth_ft, url=url,
+        )
+    except ValidationError as exc:
+        raise HTTPException(422, exc.errors())
+
+    image_url = await _save_upload(image)
+    floor_plan_url = await _save_upload(floor_plan)
+    record = manual_plans.add_plan(
+        plan_input, image_url=image_url, floor_plan_url=floor_plan_url,
+    )
+    return record
+
+
+@app.delete("/api/plans/{plan_id}")
+def remove_plan(plan_id: str):
+    """Delete a plan and its uploaded files."""
+    removed = manual_plans.delete_plan(plan_id)
+    if removed is None:
+        raise HTTPException(404, f"No plan with id {plan_id!r}")
+    return {"deleted": plan_id}

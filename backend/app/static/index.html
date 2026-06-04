@@ -64,6 +64,10 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
         Back
       </button>
+      <button id="addPlansBtn" class="header-addplans-btn" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add Plans
+      </button>
       <a class="header-docs-btn" href="https://www.sanjoseca.gov/your-government/departments-offices/planning-building-code-enforcement/planning-division/accessory-dwelling-units-adus" target="_blank" rel="noreferrer">San Jose Docs</a>
     </div>
   </header>
@@ -91,7 +95,7 @@
             </div>
             <svg class="audience-btn-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </button>
-          <button id="btnContractors" class="audience-btn audience-btn-muted" type="button" aria-describedby="contractorDesc">
+          <button id="btnContractors" class="audience-btn" type="button" aria-describedby="contractorDesc">
             <div class="audience-btn-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>
             </div>
@@ -99,7 +103,6 @@
               <span class="audience-btn-label">For Contractors</span>
               <span class="audience-btn-desc" id="contractorDesc">Batch analysis &amp; reporting</span>
             </div>
-            <span class="audience-btn-badge" aria-label="Coming soon">Soon</span>
           </button>
         </div>
         <div class="landing-trust">
@@ -401,6 +404,7 @@
       </div>
     </div>
 
+
     <!-- ── Step 3: Configure ──────────────────────────────────────────── -->
     <div id="stepConfigure" class="wizard-step" hidden>
       <div class="wizard-container wizard-container-wide">
@@ -671,6 +675,7 @@
           <div id="welcomeState"></div>
         </div>
       </div>
+
     </div><!-- /stepModel -->
 
     <!-- ── Step 5: Full Compliance Checklist ──────────────────────────── -->
@@ -710,6 +715,121 @@
         <div id="financingPanel">
           <div id="rentCards" class="metrics financing-metrics"></div>
           <p id="financingNote" class="help-text" style="margin-top:14px;">Load a site to fetch rent comps for this zip.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Add Plans (manual plan library) ──────────────────────────────── -->
+    <div id="stepAddPlans" class="wizard-step" hidden>
+      <div class="addplans-container">
+        <div class="addplans-header">
+          <div>
+            <h2 class="wizard-step-title">Plan Library</h2>
+            <p class="wizard-step-desc">Add ADU plans by hand — pick a city, enter the specs, and attach a render and floor plan. Saved plans appear below.</p>
+          </div>
+          <button id="addPlansCloseBtn" class="btn-secondary" type="button">Done</button>
+        </div>
+
+        <div class="addplans-layout">
+          <!-- Form -->
+          <form id="addPlanForm" class="addplans-form" novalidate>
+            <h3 class="addplans-form-title">New plan</h3>
+
+            <div class="apf-field">
+              <label for="apf-name">Plan name <span class="apf-req">*</span></label>
+              <input id="apf-name" name="name" type="text" maxlength="120" required placeholder="e.g. Cedar Studio">
+            </div>
+
+            <div class="apf-row">
+              <div class="apf-field">
+                <label for="apf-city">City <span class="apf-req">*</span></label>
+                <select id="apf-city" name="city" required>
+                  <option value="san_jose">San Jose</option>
+                  <option value="sf">San Francisco</option>
+                  <option value="oakland">Oakland</option>
+                </select>
+              </div>
+              <div class="apf-field">
+                <label for="apf-type">ADU type</label>
+                <select id="apf-type" name="adu_type">
+                  <option value="detached">Detached</option>
+                  <option value="attached">Attached</option>
+                  <option value="jadu">JADU</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="apf-row">
+              <div class="apf-field">
+                <label for="apf-sqft">Square footage <span class="apf-req">*</span></label>
+                <input id="apf-sqft" name="sqft" type="number" min="1" max="5000" required placeholder="600">
+              </div>
+              <div class="apf-field">
+                <label for="apf-vendor">Vendor / builder</label>
+                <input id="apf-vendor" name="vendor" type="text" maxlength="120" placeholder="optional">
+              </div>
+            </div>
+
+            <div class="apf-row">
+              <div class="apf-field">
+                <label for="apf-width">Width (ft)</label>
+                <input id="apf-width" name="width_ft" type="number" min="1" max="200" step="0.1" placeholder="optional">
+              </div>
+              <div class="apf-field">
+                <label for="apf-depth">Depth (ft)</label>
+                <input id="apf-depth" name="depth_ft" type="number" min="1" max="200" step="0.1" placeholder="optional">
+              </div>
+            </div>
+
+            <div class="apf-row">
+              <div class="apf-field">
+                <label for="apf-beds">Bedrooms</label>
+                <input id="apf-beds" name="bedrooms" type="number" min="0" max="10" placeholder="optional">
+              </div>
+              <div class="apf-field">
+                <label for="apf-baths">Bathrooms</label>
+                <input id="apf-baths" name="bathrooms" type="number" min="0" max="10" placeholder="optional">
+              </div>
+            </div>
+
+            <div class="apf-field">
+              <label for="apf-url">Plan / vendor URL</label>
+              <input id="apf-url" name="url" type="url" maxlength="500" placeholder="https://…">
+            </div>
+
+            <div class="apf-row">
+              <div class="apf-field">
+                <label for="apf-image">Render image</label>
+                <input id="apf-image" name="image" type="file" accept="image/*">
+              </div>
+              <div class="apf-field">
+                <label for="apf-floorplan">Floor plan</label>
+                <input id="apf-floorplan" name="floor_plan" type="file" accept="image/*,application/pdf">
+              </div>
+            </div>
+
+            <div id="addPlanError" class="apf-error" hidden role="alert"></div>
+
+            <button id="addPlanSubmit" class="btn-primary apf-submit" type="submit">Add plan</button>
+          </form>
+
+          <!-- Saved plans -->
+          <div class="addplans-list-wrap">
+            <div class="addplans-list-head">
+              <h3 class="addplans-form-title" style="margin:0;">Saved plans</h3>
+              <div class="seg seg-sm" id="addPlansCityFilter" role="group" aria-label="Filter by city">
+                <button type="button" class="seg-btn active" data-city="">All</button>
+                <button type="button" class="seg-btn" data-city="san_jose">San Jose</button>
+                <button type="button" class="seg-btn" data-city="sf">SF</button>
+                <button type="button" class="seg-btn" data-city="oakland">Oakland</button>
+              </div>
+            </div>
+            <div id="addPlansList" class="addplans-cards"></div>
+            <div id="addPlansEmpty" class="addplans-empty" hidden>
+              <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+              <p>No plans yet. Add your first one with the form.</p>
+            </div>
+          </div>
         </div>
       </div>
     </div>

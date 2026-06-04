@@ -26,6 +26,24 @@ class SiteRequest(BaseModel):
         "",
         description="Street address to geocode and load from the city's parcel GIS.",
     )
+    latitude: float | None = Field(
+        None,
+        ge=-90.0,
+        le=90.0,
+        description=(
+            "Optional selected point latitude. When supplied with longitude, "
+            "the site pipeline loads the parcel containing that point instead "
+            "of geocoding address."
+        ),
+    )
+    longitude: float | None = Field(
+        None,
+        ge=-180.0,
+        le=180.0,
+        description=(
+            "Optional selected point longitude. Must be supplied with latitude."
+        ),
+    )
     include_checklist: bool = False
     standards: Standards = Field(
         "city",

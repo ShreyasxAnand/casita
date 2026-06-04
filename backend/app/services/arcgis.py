@@ -62,9 +62,12 @@ async def query_features(
     *,
     geometry: str,
     geometry_type: GeometryType,
+    where: str = "1=1",
     out_fields: str = "*",
     return_geometry: bool = True,
     max_records: int = 100,
+    result_offset: int | None = None,
+    order_by_fields: str | None = None,
     stage: str = "ArcGIS query",
 ) -> list[dict[str, Any]]:
     """Query an ArcGIS MapServer/FeatureServer layer with a consistent shape.
@@ -73,6 +76,7 @@ async def query_features(
     `_query_arcgis_attrs_*` helpers from the original `main.py`.
     """
     params: dict[str, Any] = {
+        "where": where,
         "geometry": geometry,
         "geometryType": geometry_type,
         "inSR": "4326",
@@ -85,6 +89,10 @@ async def query_features(
         params["outSR"] = "4326"
     if max_records:
         params["resultRecordCount"] = str(max_records)
+    if result_offset is not None:
+        params["resultOffset"] = str(result_offset)
+    if order_by_fields:
+        params["orderByFields"] = order_by_fields
 
     data = await fetch_json(client, url, params, stage=stage)
     return data.get("features") or []
