@@ -72,12 +72,26 @@ def _designation_status(
     return true_status if present else false_status
 
 
-def _designation_detail(result: FetchResult[DesignationData], fallback: str) -> str:
+def _designation_detail(
+    result: FetchResult[DesignationData],
+    fallback: str,
+    *,
+    absent_msg: str | None = None,
+    present_suffix: str | None = None,
+) -> str:
+    """Build a detail string that matches the actual result state.
+
+    - FAILED  → "Lookup unavailable — [error]. [fallback]"
+    - ABSENT / OK(not present) → absent_msg (if given) or fallback
+    - OK(present) → "[gis detail]. [present_suffix or fallback]"
+    """
     if result.is_failed:
         return f"Lookup unavailable — {result.error or 'service error'}. {fallback}"
-    if result.data and result.data.detail:
-        return result.data.detail
-    return fallback
+    not_present = result.is_absent or (result.data is not None and not result.data.present)
+    if not_present:
+        return absent_msg if absent_msg is not None else fallback
+    gis = (result.data.detail.rstrip(". ") + ". ") if (result.data and result.data.detail) else ""
+    return gis + (present_suffix if present_suffix is not None else fallback)
 
 
 @dataclass(frozen=True)
@@ -458,8 +472,16 @@ def _part2_designations(ctx: ChecklistContext) -> list[dict[str, Any]]:
             question="Q4. Flood zones A, AE, AH, or AO?",
             detail=_designation_detail(
                 ctx.flood,
-                "Check SJPermits.org. If yes, plans must follow Bulletin #211. "
+                "Check SJPermits.org. If in a flood zone, plans must follow Bulletin #211. "
                 "(Does not apply to zones D and X.)",
+                absent_msg=(
+                    "This property is NOT in a FEMA Special Flood Hazard Area "
+                    "(zones A, AE, AH, or AO). Flood-zone compliance requirements do not apply."
+                ),
+                present_suffix=(
+                    "Plans must comply with Bulletin #211 flood requirements. "
+                    "(Zone D and X are exempt.)"
+                ),
             ),
             source=ctx.flood.source or "FEMA NFHL / San Jose Flood Hazard layer / SJPermits.org",
         ),
@@ -470,8 +492,16 @@ def _part2_designations(ctx: ChecklistContext) -> list[dict[str, Any]]:
             detail=_designation_detail(
                 ctx.geohazard,
                 "Check SJPermits.org ('Geohazard Zone' and 'Seismic Hazards'). "
-                "If yes/landslide: Geologic Hazard Clearance required. "
-                "If liquefaction + 2 or more units: Geologic Clearance required.",
+                "If in a landslide zone: Geologic Hazard Clearance required. "
+                "If in a liquefaction zone with 2+ units: Geologic Clearance required.",
+                absent_msg=(
+                    "This property is NOT in a designated geohazard, liquefaction, or landslide zone. "
+                    "No geologic clearance is required."
+                ),
+                present_suffix=(
+                    "A Geologic Hazard Clearance is required before permit issuance. "
+                    "Confirm details at SJPermits.org ('Geohazard Zone' and 'Seismic Hazards')."
+                ),
             ),
             source=ctx.geohazard.source or "San Jose PLN Land Designations layer 31",
         ),
@@ -481,8 +511,17 @@ def _part2_designations(ctx: ChecklistContext) -> list[dict[str, Any]]:
             question="Q6. Historic property — on City Historic Resources Inventory or CA Historical Resources list?",
             detail=_designation_detail(
                 ctx.historic,
-                "If yes + City Development Standards: simplified design standards per 20.80.175(E). "
-                "If yes + State Standards: check with Planning — historic review may still apply.",
+                "If on the City Historic Resources Inventory: simplified design standards apply "
+                "per 20.80.175(E). If on the CA Historical Resources list: check with Planning — "
+                "historic review may still apply.",
+                absent_msg=(
+                    "This property is NOT on the City Historic Resources Inventory or the "
+                    "CA Historical Resources list. Standard ADU development standards apply."
+                ),
+                present_suffix=(
+                    "City Development Standards: simplified design standards apply per 20.80.175(E). "
+                    "State Standards: check with Planning — historic review may still apply."
+                ),
             ),
             source=ctx.historic.source or "San Jose HRI layers 406 + 408",
         ),
@@ -492,7 +531,14 @@ def _part2_designations(ctx: ChecklistContext) -> list[dict[str, Any]]:
             question="Q7. Wildland-Urban Interface (WUI) zone?",
             detail=_designation_detail(
                 ctx.wui,
-                "If yes, construction must comply with all WUI Fire Conformance Policy requirements.",
+                "If in a WUI zone, construction must comply with all WUI Fire Conformance Policy requirements.",
+                absent_msg=(
+                    "This property is NOT in a Wildland-Urban Interface (WUI) zone. "
+                    "WUI fire conformance requirements do not apply."
+                ),
+                present_suffix=(
+                    "Construction must comply with all WUI Fire Conformance Policy requirements."
+                ),
             ),
             source=ctx.wui.source or "San Jose WUI layer / USDA WUI",
         ),
@@ -942,7 +988,17 @@ def _part5_misc(ctx: ChecklistContext) -> list[dict[str, Any]]:
             question="Q16. Tree removal — will the ADU require removal of a heritage tree?",
             detail=_designation_detail(
                 ctx.heritage,
-                "View the City Heritage Tree List. If yes, visit sanjoseca.gov/TreePermit.",
+                "Check the City Heritage Tree List. If a heritage tree must be removed, "
+                "a tree removal permit is required — visit sanjoseca.gov/TreePermit.",
+                absent_msg=(
+                    "No heritage tree records found on or near this parcel. "
+                    "If construction plans require removing any trees, confirm their heritage status "
+                    "at sanjoseca.gov/TreePermit before proceeding."
+                ),
+                present_suffix=(
+                    "If ADU construction requires removal of any of these trees, "
+                    "a tree removal permit is required. Visit sanjoseca.gov/TreePermit."
+                ),
             ),
             source=ctx.heritage.source or "San Jose Heritage Trees layer 511 / sanjoseca.gov/TreePermit",
         ),

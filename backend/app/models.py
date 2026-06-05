@@ -72,7 +72,7 @@ class SiteRequest(BaseModel):
     # request 60-ft "ADUs" that would never be code-compliant.
     adu_width_ft: float = Field(30.0, ge=8.0, le=40.0)
     adu_depth_ft: float = Field(40.0, ge=8.0, le=60.0)
-    adu_height_ft: float = Field(16.0, ge=10.0, le=24.0)
+    adu_height_ft: float = Field(16.0, ge=10.0, le=30.0)
     front_edge_index: int | None = Field(
         None,
         description="Index of the parcel ring edge the user identified as facing the street.",
@@ -81,6 +81,15 @@ class SiteRequest(BaseModel):
     down_payment_pct: float = Field(0.20, ge=0.0, le=1.0)
     interest_rate_pct: float = Field(7.5, ge=0.0, le=20.0)
     loan_term_years: int = Field(30, ge=5, le=40)
+    refresh: bool = Field(
+        False,
+        description=(
+            "Force a fresh fetch of geocode/GIS/permits/property data instead of "
+            "reusing the per-property server cache. The initial address submit "
+            "sets this; lightweight standards/dimension refreshes leave it false "
+            "so they reuse the cached context and stay instant."
+        ),
+    )
 
 
 def stage(

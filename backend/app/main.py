@@ -195,7 +195,7 @@ def get_cities():
 
 
 @app.post("/api/site")
-@limiter.limit("3/minute")
+@limiter.limit("60/minute")
 async def post_site(request: Request, body: SiteRequest):
     adapter = get_adapter(body.city)
     return await run_site_pipeline(app.state.http_client, body, adapter)

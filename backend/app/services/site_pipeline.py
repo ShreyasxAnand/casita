@@ -13,6 +13,7 @@ import hashlib
 import logging
 import math
 import time
+from collections import OrderedDict
 from typing import Any
 
 import httpx
@@ -31,6 +32,7 @@ from app.property_data import (
     build_financing,
     build_property_stats,
     build_zip_context,
+    compute_financial_score,
     find_subject_in_zip,
     get_property_by_address,
     search_properties_by_zip,
@@ -40,6 +42,72 @@ from app.services.arcgis import TO_UTM
 from app.site_model import M_TO_FT, build_site_model, parcel_area_ft2_from_fc
 
 logger = logging.getLogger(__name__)
+
+
+# ── Site-context cache ────────────────────────────────────────────────────────
+# The expensive half of the pipeline — geocoding, parcel/building outlines,
+# zoning, designations, permits, code enforcement, and the (slow) HomeHarvest
+# property lookup — depends only on *which* property is being analyzed, not on
+# the ADU standards/type/stories/dimensions the user toggles in the UI. Caching
+# it per property keeps standards switches and dimension edits instant instead
+# of re-running every external fetch, and stops rapid toggles from tripping the
+# per-IP rate limit on `POST /api/site`.
+_CONTEXT_TTL_S = 600.0  # 10 minutes
+_CONTEXT_CACHE_MAX = 256
+
+
+@dataclasses.dataclass
+class _SiteContext:
+    """Cacheable result of every external fetch the pipeline performs."""
+
+    geocode: GeocodeResult
+    parcel_fc: dict[str, Any]
+    parcel_source: str
+    parcel_id: str | None
+    building_fc: dict[str, Any]
+    building_source: str
+    zoning_result: FetchResult[Any]
+    gp_result: FetchResult[Any]
+    typed_designations: dict[str, FetchResult[Any]]
+    permits_result: FetchResult[Any]
+    ce_result: FetchResult[Any]
+    property_stats: dict[str, Any]
+    zip_context: dict[str, Any]
+    fetch_stages: list[dict[str, Any]]
+
+
+# Insertion-ordered so the oldest entry is evicted first once the cap is hit.
+_context_cache: "OrderedDict[str, tuple[float, _SiteContext]]" = OrderedDict()
+
+
+def _context_cache_key(req: SiteRequest, adapter: CityAdapter) -> str:
+    """Key a context by city + address (or selected coordinates).
+
+    Keyed on the *request inputs*, so the same address/point always reuses the
+    same fetched context regardless of standards/type/dimension fields.
+    """
+    if req.latitude is not None and req.longitude is not None:
+        return f"{adapter.name}|{round(float(req.latitude), 6)}|{round(float(req.longitude), 6)}"
+    return f"{adapter.name}|addr|{(req.address or '').strip().lower()}"
+
+
+def _cache_get(key: str) -> _SiteContext | None:
+    entry = _context_cache.get(key)
+    if entry is None:
+        return None
+    ts, ctx = entry
+    if time.monotonic() - ts > _CONTEXT_TTL_S:
+        _context_cache.pop(key, None)
+        return None
+    _context_cache.move_to_end(key)  # LRU touch
+    return ctx
+
+
+def _cache_put(key: str, ctx: _SiteContext) -> None:
+    _context_cache[key] = (time.monotonic(), ctx)
+    _context_cache.move_to_end(key)
+    while len(_context_cache) > _CONTEXT_CACHE_MAX:
+        _context_cache.popitem(last=False)
 
 
 def _feature_collection(features: list[dict[str, Any]]) -> dict[str, Any]:
@@ -359,17 +427,20 @@ def _apply_jadu_buildable_zone(site_model: dict[str, Any]) -> None:
     })
 
 
-async def run_site_pipeline(
+async def _fetch_site_context(
     client: httpx.AsyncClient, req: SiteRequest, adapter: CityAdapter,
-) -> dict[str, Any]:
-    """Full live-address pipeline used by `POST /api/site`.
+) -> _SiteContext:
+    """Run the external-fetch half of the pipeline and bundle the results.
 
-    Reads top-to-bottom as five phases:
+    Reads top-to-bottom as four phases:
       1. Geocode the address (adapter validates the address belongs to its city).
       2. Kick HomeHarvest lookups off in worker threads (overlap with GIS).
       3. Fetch parcel + building outlines via the adapter.
       4. Fetch zoning, General Plan, designations, permits, code enforcement.
-      5. Build the site model, derive job id + checklist, assemble response.
+
+    Everything here depends only on *which* property is being analyzed, so the
+    result is cached by `run_site_pipeline` and reused across standards/type/
+    dimension toggles.
     """
     stages: list[dict[str, Any]] = []
 
@@ -413,7 +484,6 @@ async def run_site_pipeline(
             },
         ))
     lat, lon = geocode.latitude, geocode.longitude
-    address = geocode.matched_address
 
     # 2. HomeHarvest (overlapped with GIS calls below) ───────────────────
     prop_data_task = asyncio.create_task(
@@ -467,8 +537,87 @@ async def run_site_pipeline(
     )
     stages.extend(pe_stages)
 
-    property_stats, zip_context, financing, prop_stage = await prop_data_task
+    property_stats, zip_context, _financing, prop_stage = await prop_data_task
     stages.append(prop_stage)
+
+    return _SiteContext(
+        geocode=geocode,
+        parcel_fc=parcel_fc,
+        parcel_source=parcel_source,
+        parcel_id=parcel_id,
+        building_fc=building_fc,
+        building_source=building_source,
+        zoning_result=zoning_result,
+        gp_result=gp_result,
+        typed_designations=typed_designations,
+        permits_result=permits_result,
+        ce_result=ce_result,
+        property_stats=property_stats,
+        zip_context=zip_context,
+        fetch_stages=stages,
+    )
+
+
+async def run_site_pipeline(
+    client: httpx.AsyncClient, req: SiteRequest, adapter: CityAdapter,
+) -> dict[str, Any]:
+    """Full live-address pipeline used by `POST /api/site`.
+
+    Splits into two halves. The expensive external fetches (geocode, GIS,
+    permits, HomeHarvest) are produced by `_fetch_site_context` and cached per
+    property; this function layers the request-dependent, purely-local work
+    (development-standards constraints, site model, checklist, financing) on top
+    so standards/type/dimension toggles stay instant and never re-hit external
+    services. Pass ``refresh=true`` to force a fresh fetch (used by the initial
+    address submit).
+    """
+    cache_key = _context_cache_key(req, adapter)
+    ctx = None if req.refresh else _cache_get(cache_key)
+    cache_hit = ctx is not None
+    if ctx is None:
+        ctx = await _fetch_site_context(client, req, adapter)
+        _cache_put(cache_key, ctx)
+
+    stages: list[dict[str, Any]] = []
+    if cache_hit:
+        stages.append({
+            "name": "cache_hit",
+            "status": "ok",
+            "duration_ms": 0,
+            "detail": "Reused cached parcel, zoning, permits, and property data "
+                      "(unchanged by standards/dimension edits).",
+            "data": {"ttl_s": int(_CONTEXT_TTL_S)},
+            "log_tail": None,
+        })
+    stages.extend(ctx.fetch_stages)
+
+    geocode = ctx.geocode
+    lat, lon = geocode.latitude, geocode.longitude
+    address = geocode.matched_address
+    parcel_fc = ctx.parcel_fc
+    parcel_source = ctx.parcel_source
+    parcel_id = ctx.parcel_id
+    building_fc = ctx.building_fc
+    building_source = ctx.building_source
+    zoning_result = ctx.zoning_result
+    gp_result = ctx.gp_result
+    typed_designations = ctx.typed_designations
+    permits_result = ctx.permits_result
+    ce_result = ctx.ce_result
+    property_stats = ctx.property_stats
+    zip_context = ctx.zip_context
+
+    # Financing tracks the requested ADU dimensions / cost inputs, so recompute
+    # it from the cached zip context rather than caching it with the context.
+    financing = build_financing(
+        req.adu_width_ft,
+        req.adu_depth_ft,
+        zip_context,
+        build_cost_per_sqft=req.build_cost_per_sqft,
+        down_payment_pct=req.down_payment_pct,
+        interest_rate_pct=req.interest_rate_pct,
+        loan_term_years=req.loan_term_years,
+    )
 
     # 5. Resolve development-standards constraints ────────────────────────
     parcel_area_ft2 = parcel_area_ft2_from_fc(parcel_fc)
@@ -544,6 +693,14 @@ async def run_site_pipeline(
     )
     stages.append(_site_model_stage(building_source, adu_type_key))
 
+    adu_sqft_model = site_model["adu"]["width_ft"] * site_model["adu"]["depth_ft"]
+    financial_analysis = compute_financial_score(
+        adu_sqft=adu_sqft_model,
+        adu_type=adu_type_key,
+        zip_context=zip_context,
+        estimated_value=property_stats.get("estimated_value"),
+    )
+
     data_warnings = _collect_data_warnings(
         zoning_result, gp_result, typed_designations, permits_result, ce_result,
     )
@@ -573,6 +730,7 @@ async def run_site_pipeline(
         "property_stats": property_stats,
         "zip_context": zip_context,
         "financing": financing,
+        "financial_analysis": financial_analysis,
         "stages": stages,
         "debug": {
             "mode": f"live_{adapter.name}_address",

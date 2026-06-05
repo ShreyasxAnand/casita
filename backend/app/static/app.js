@@ -109,6 +109,8 @@
     let propertyStats = null;
     let zipContext = null;
     let financing = null;
+    let estimatedValue = null;
+    let _lastSiteData = null;  // full /api/site response; used by Casita Report
     let aduTypeVal = 'detached'; // 'detached' | 'attached' | 'jadu'
     let standardsVal = 'city';  // 'city' | 'state'
     let displayUnit = localStorage.getItem('aduMvpUnit') || 'ft'; // 'ft' | 'm'
@@ -153,6 +155,9 @@
     let real3dFloorHeightM = NaN;
     let real3dFloorReady = false;
     let real3dFloorSampleInFlight = false;
+    // Set to true after the first allTilesLoaded event so we do exactly one
+    // re-refinement of the parcel floor height with fully-streamed tiles.
+    let real3dAllTilesRefined = false;
 
     let real3dPreviewLocked = false;
     let real3dGpuFallback = false;
@@ -187,6 +192,7 @@
     let houseEditMode = false;
     let houseEditTrim = null; // glow ring shown only in edit mode
     let aduState = { x: 0, y: 0, rot: 0, widthM: 18 * FT_TO_M, depthM: 24 * FT_TO_M, heightM: 16 * FT_TO_M };
+    let aduManuallyMoved = false; // true once user drags the ADU; preserved through dimension-only refreshes
     let aduValid = true;
     let drag = { active: false, offset: new THREE.Vector3(), plane: new THREE.Plane(new THREE.Vector3(0, 0, 1), 0) };
 
@@ -218,11 +224,12 @@
       els.snapBtn.disabled = disabled || !siteModel;
     }
 
-    async function postJson(path, body) {
+    async function postJson(path, body, signal) {
       const res = await fetch(API_BASE + path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal,
       });
       const text = await res.text();
       const data = text ? JSON.parse(text) : {};
@@ -257,16 +264,21 @@
           adu_depth_ft: Number(els.aduDepth.value) || 40,
           adu_height_ft: Number(els.sidebarHeight?.value || els.height?.value) || 16,
           front_edge_index: selectedFrontEdgeIdx,
+          // Full address submit fetches fresh; the lightweight standards/dimension
+          // refreshes below omit this and reuse the cached per-property context.
+          refresh: true,
         };
         if (leadLat != null && leadLon != null) {
           siteRequest.latitude = leadLat;
           siteRequest.longitude = leadLon;
         }
         const data = await postJson('/api/site', siteRequest);
+        _lastSiteData = data;
         siteModel = data.site_model;
         propertyStats = data.property_stats || null;
         zipContext = data.zip_context || null;
         financing = data.financing || null;
+        estimatedValue = data.property_stats?.estimated_value ?? null;
         renderFinancing();
         real3dAduBaseHeightM = NaN;
         real3dFloorHeightM = NaN;
@@ -326,7 +338,9 @@
       scene.fog = new THREE.Fog(0xf7f7f7, 220, 600);
       camera = new THREE.PerspectiveCamera(38, 1, 0.1, 2000);
       camera.up.set(0, 0, 1);
-      renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+      // preserveDrawingBuffer lets the Casita Report read the canvas via
+      // toDataURL() after an off-cycle render (multi-angle 3D capture).
+      renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: true });
       renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -728,24 +742,36 @@
       aduState.widthM = Number(els.aduWidth.value) * FT_TO_M;
       aduState.depthM = Number(els.aduDepth.value) * FT_TO_M;
       aduState.heightM = Number(els.height.value) * FT_TO_M;
-      if (firstPlacement) {
-        aduState.x = firstPlacement.center_local[0];
-        aduState.y = firstPlacement.center_local[1];
-        aduState.rot = firstPlacement.rotation_deg;
-        els.snapBtn.disabled = false;
+
+      // When the user has manually moved the ADU and we're only updating
+      // dimensions (preserveDimensions=true), keep their position so the
+      // report shows the ADU where they placed it. Reset the flag on a fresh
+      // site load (preserveDimensions=false).
+      if (preserveDimensions && aduManuallyMoved) {
+        // Dimensions updated above; x/y/rot preserved from the manual drag.
+        els.rotation.value = String(Math.round(aduState.rot));
+        els.snapBtn.disabled = !firstPlacement;
       } else {
-        // No auto-fit candidate (e.g. ADU larger than buildable zone). Drop
-        // the ADU at the parcel centroid so the user can still drag it and
-        // see what fits. Always orient with the parcel so it doesn't look crooked.
-        aduState.x = 0;
-        aduState.y = 0;
-        const propertyAxis = Number(siteModel?.adu?.suggested_rotation_deg || 0);
-        aduState.rot = aduRotationForAxis(propertyAxis, aduState.widthM, aduState.depthM);
-        els.snapBtn.disabled = true;
+        aduManuallyMoved = false;
+        if (firstPlacement) {
+          aduState.x = firstPlacement.center_local[0];
+          aduState.y = firstPlacement.center_local[1];
+          aduState.rot = firstPlacement.rotation_deg;
+          els.snapBtn.disabled = false;
+        } else {
+          // No auto-fit candidate (e.g. ADU larger than buildable zone). Drop
+          // the ADU at the parcel centroid so the user can still drag it and
+          // see what fits. Always orient with the parcel so it doesn't look crooked.
+          aduState.x = 0;
+          aduState.y = 0;
+          const propertyAxis = Number(siteModel?.adu?.suggested_rotation_deg || 0);
+          aduState.rot = aduRotationForAxis(propertyAxis, aduState.widthM, aduState.depthM);
+          els.snapBtn.disabled = true;
+        }
+        els.rotation.value = String(Math.round(aduState.rot));
+        if (aduTypeVal === 'attached') snapInitialToWall();
+        else if (aduTypeVal === 'jadu') snapInitialToHouseCenter();
       }
-      els.rotation.value = String(Math.round(aduState.rot));
-      if (aduTypeVal === 'attached') snapInitialToWall();
-      else if (aduTypeVal === 'jadu') snapInitialToHouseCenter();
       rebuildAdu();
     }
 
@@ -835,7 +861,9 @@
       aduMesh.castShadow = true;
       aduMesh.receiveShadow = true;
       aduMesh.userData.draggable = 'adu';
-      setAduValidityMaterial(isAduValid(aduState.x, aduState.y, aduState.rot));
+      // snap=true: apply correct color immediately — avoids a green flash when
+      // the ADU first appears in an invalid position before the tween runs.
+      setAduValidityMaterial(isAduValid(aduState.x, aduState.y, aduState.rot), true);
       scene.add(aduMesh);
       renderMetrics();
       updateHud();
@@ -851,12 +879,21 @@
       schedulePushUrlState();
     }
 
-    function setAduValidityMaterial(valid) {
+    // `snap` = true: apply color/opacity immediately (no tween), used on first
+    // placement so the mesh never flashes the wrong color for even one frame.
+    function setAduValidityMaterial(valid, snap = false) {
       if (!aduMesh) return;
       aduValid = valid;
-      // Set tween targets — animate loop lerps toward these for smooth feel.
-      aduMesh.userData.targetColor = new THREE.Color(valid ? 0x2f8f58 : 0xb33a44);
-      aduMesh.userData.targetOpacity = valid ? 0.62 : 0.42;
+      const targetColor = new THREE.Color(valid ? 0x2f8f58 : 0xb33a44);
+      const targetOpacity = valid ? 0.62 : 0.42;
+      aduMesh.userData.targetColor = targetColor;
+      aduMesh.userData.targetOpacity = targetOpacity;
+      if (snap) {
+        aduMesh.material.color.copy(targetColor);
+        aduMesh.material.opacity = targetOpacity;
+        aduMesh.material.transparent = targetOpacity < 0.99;
+        aduMesh.material.needsUpdate = true;
+      }
       els.statusText.textContent = valid
         ? 'ADU placement valid'
         : 'ADU is outside the buildable zone (overlapping setback / house clearance)';
@@ -983,6 +1020,106 @@
       controls.update();
     }
 
+    // Site center + half-extent for camera framing (shared by the report capture).
+    function _siteFraming() {
+      const center = new THREE.Vector3(0, 0, 0);
+      let halfExtent = 24;
+      const cs = siteModel?.imagery?.corners_local_m;
+      if (cs && cs.length === 4) {
+        const xs = cs.map(c => c[0]), ys = cs.map(c => c[1]);
+        const minX = Math.min(...xs), maxX = Math.max(...xs);
+        const minY = Math.min(...ys), maxY = Math.max(...ys);
+        center.set((minX + maxX) / 2, (minY + maxY) / 2, 0);
+        halfExtent = Math.max(maxX - minX, maxY - minY) * 0.5;
+      } else if (parcelGroup && parcelGroup.children.length) {
+        const box = new THREE.Box3().setFromObject(parcelGroup);
+        box.getCenter(center); center.z = 0;
+        const size = box.getSize(new THREE.Vector3());
+        halfExtent = Math.max(size.x, size.y, 20) * 0.5;
+      }
+      return { center, halfExtent };
+    }
+
+    /**
+     * Render the model from several fixed camera angles and return
+     * `[{ label, url }]` PNG data URLs for the Casita Report.
+     *
+     * Uses the persistent renderer/scene, so it works even while the model tab
+     * is hidden (the report is opened from the financing step). The live camera,
+     * controls, and canvas size are saved and restored exactly, so the on-screen
+     * viewer is untouched. Requires a built scene (after loadSite -> buildScene);
+     * returns [] otherwise so the report simply omits the section.
+     */
+    function capture3dViews({ width = 1280, height = 920, margin = 1.28 } = {}) {
+      if (!renderer || !scene || !camera || !controls) return [];
+      if (!parcelGroup || !parcelGroup.children.length) return [];
+
+      const { center, halfExtent } = _siteFraming();
+      const dist = (halfExtent / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2))) * margin;
+
+      const saved = {
+        pos: camera.position.clone(),
+        up: camera.up.clone(),
+        aspect: camera.aspect,
+        near: camera.near,
+        far: camera.far,
+        target: controls.target.clone(),
+        size: renderer.getSize(new THREE.Vector2()),
+        pr: renderer.getPixelRatio(),
+      };
+
+      // azimuth (deg, CCW from +X/east) + elevation (deg above ground).
+      const views = [
+        { label: 'Aerial', az: 210, el: 65 },
+        { label: 'Front', az: 200, el: 20 },
+        { label: 'Rear', az: 25, el: 26 },
+        { label: 'Side', az: 110, el: 30 },
+      ];
+
+      renderer.setPixelRatio(1);
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.near = 0.1;
+      camera.far = 4000;
+      camera.up.set(0, 0, 1);
+
+      const results = [];
+      for (const v of views) {
+        const az = THREE.MathUtils.degToRad(v.az);
+        const el = THREE.MathUtils.degToRad(v.el);
+        const dir = new THREE.Vector3(
+          Math.cos(el) * Math.cos(az),
+          Math.cos(el) * Math.sin(az),
+          Math.sin(el),
+        );
+        camera.position.copy(center).addScaledVector(dir, dist);
+        camera.lookAt(center);
+        camera.updateProjectionMatrix();
+        renderer.render(scene, camera);
+        try {
+          results.push({ label: v.label, url: renderer.domElement.toDataURL('image/png') });
+        } catch (err) {
+          debugWarn('3D view capture failed (canvas tainted?):', err);
+          break;
+        }
+      }
+
+      // Restore the live viewer exactly as it was.
+      renderer.setPixelRatio(saved.pr);
+      renderer.setSize(saved.size.x, saved.size.y, false);
+      camera.aspect = saved.aspect;
+      camera.near = saved.near;
+      camera.far = saved.far;
+      camera.up.copy(saved.up);
+      camera.position.copy(saved.pos);
+      controls.target.copy(saved.target);
+      camera.updateProjectionMatrix();
+      controls.update();
+      renderer.render(scene, camera);
+
+      return results;
+    }
+
     function areaLabel() { return displayUnit === 'm' ? 'sq m' : 'sq ft'; }
     function areaValue(ft2) {
       if (ft2 == null || Number.isNaN(Number(ft2))) return null;
@@ -1074,6 +1211,13 @@
 
     const _CHECK_ICONS = { pass: '✓', fail: '✗', verify: '!', info: 'i', unavailable: '–' };
 
+    const _CHECK_VERDICTS = {
+      pass:        'DOES PASS',
+      fail:        'DOES NOT PASS',
+      verify:      'NEEDS VERIFICATION',
+      unavailable: 'DATA UNAVAILABLE',
+    };
+
     const _PART_LABELS = {
       1: 'Property Qualification',
       2: 'Property Designations',
@@ -1086,11 +1230,16 @@
       const icon = _CHECK_ICONS[item.status] || '?';
       const st = escapeHtml(String(item.status));
       const qNum = item.number != null ? `<span class="check-partnum">Q${item.number}</span>` : '';
+      const verdictText = _CHECK_VERDICTS[item.status];
+      const verdictHtml = verdictText
+        ? `<div class="check-verdict ${st}">${verdictText}</div>`
+        : '';
       return `<div class="check" data-status="${st}">
         <div class="check-row">
           <div class="check-icon ${st}">${icon}</div>
           <div>
             <div class="check-header">${qNum}<span class="check-q">${escapeHtml(item.question || '')}</span></div>
+            ${verdictHtml}
             <div class="check-detail">${escapeHtml(item.detail || '')}</div>
             ${item.source ? `<div class="meta">Source: ${escapeHtml(item.source)}</div>` : ''}
           </div>
@@ -1460,6 +1609,7 @@
           adu_height_ft: h,
           front_edge_index: selectedFrontEdgeIdx,
         });
+        _lastSiteData = data;
         const items = data.checklist?.items || [];
         _allChecklistItems = items;
         _checklistDims = { w, d, h, floors: currentFloors, type, standards: standardsVal };
@@ -1469,6 +1619,7 @@
           propertyStats = data.property_stats || propertyStats;
           zipContext = data.zip_context || zipContext;
           financing = data.financing || financing;
+          if (data.property_stats?.estimated_value != null) estimatedValue = data.property_stats.estimated_value;
           _updateHeightSlider(type, currentFloors);
           buildScene({ preserveDimensions: true });
           renderAduPicker(propertyStats);
@@ -1632,6 +1783,7 @@
         // Detached: free drag — validity shown by colour only.
         aduState.x = nx;
         aduState.y = ny;
+        aduManuallyMoved = true; // preserve this position through dimension-only refreshes
         aduMesh.position.x = aduState.x;
         aduMesh.position.y = aduState.y;
         setAduValidityMaterial(isAduValid(aduState.x, aduState.y, aduState.rot));
@@ -1733,7 +1885,7 @@
     function preloadBasemaps() {
       for (const mode of ['satellite', 'streets']) {
         const desc = basemapDescriptor(mode);
-        if (desc?.url_image) loadFloorTexture(mode, desc);
+        if (desc?.url_image) loadFloorTexture(mode, desc).catch(() => {});
       }
     }
 
@@ -1765,6 +1917,11 @@
         floorMaterial.opacity = 1;
         floorMaterial.needsUpdate = true;
         els.imageryHud.textContent = desc.label || mode;
+      }).catch(() => {
+        if ((els.floorMode?.value || 'satellite') === mode) {
+          applyProceduralFloor(0xe7ece8, 0.96);
+          els.imageryHud.textContent = 'Map unavailable';
+        }
       });
     }
 
@@ -1823,6 +1980,15 @@
       return rings.some(r => pointInRings(x, y, r));
     }
 
+    // For attached ADUs: check against the setback-eroded parcel BEFORE the
+    // house is subtracted. Attached ADUs share a wall, so their corners sit
+    // exactly on the house boundary — pointInBuildable (which excludes the house)
+    // gives undefined results for boundary points and causes false invalids.
+    function pointInParcelEroded(x, y) {
+      const rings = (siteModel?.buildable_zone?.parcel_eroded_polygons || []).map(p => p.rings_local);
+      return rings.some(r => pointInRings(x, y, r));
+    }
+
     function aduCorners(x, y, rotationDeg) {
       const hw = aduState.widthM / 2;
       const hd = aduState.depthM / 2;
@@ -1844,7 +2010,12 @@
         edgeSamples.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
       }
       edgeSamples.push([x, y]);
-      return edgeSamples.every(([px, py]) => pointInBuildable(px, py));
+      // Attached ADUs share a wall with the house, so their corners land on the
+      // house-boundary edge. pointInBuildable (which excludes the house interior)
+      // is undefined for boundary points and causes false red flashes.
+      // Use the pre-house-subtraction parcel-eroded zone instead.
+      const inZone = aduTypeVal === 'attached' ? pointInParcelEroded : pointInBuildable;
+      return edgeSamples.every(([px, py]) => inZone(px, py));
     }
 
     // ── House-geometry helpers for Attached / JADU placement ──────────────────
@@ -2398,7 +2569,13 @@
       try {
         const base = await sampleMeshHeightPercentile(aduGroundProbeLonLats(), 0.16);
         if (!Number.isFinite(base)) return;
-        if (Math.abs(base - real3dAduBaseHeightM) < 0.05) return;
+        // Sanity check: reject samples that are implausibly above the parcel
+        // floor (bad tile hit — rooftop, tree crown, etc.). A legitimate slope
+        // on a residential lot is rarely more than 4 m across a parcel.
+        if (Number.isFinite(real3dFloorHeightM) && base > real3dFloorHeightM + 4.5) return;
+        // 20 cm change threshold — 5 cm was too sensitive to tile-streaming
+        // noise and caused the ADU to drift upward on repeated probes.
+        if (Math.abs(base - real3dAduBaseHeightM) < 0.20) return;
         real3dAduBaseHeightM = base;
         renderAduAtCurrentBase();
       } finally {
@@ -2439,6 +2616,7 @@
       real3dAduProbeInFlight = false;
       real3dFloorReady = false;
       real3dFloorSampleInFlight = false;
+      real3dAllTilesRefined = false;
       real3dFloorHeightM = NaN;
       real3dAduBaseHeightM = NaN;
       if (!cesiumViewer) return;
@@ -2475,6 +2653,9 @@
       const tilesetUrl = `https://tile.googleapis.com/v1/3dtiles/root.json?key=${encodeURIComponent(key)}`;
       if (!cesiumViewer) {
         cesiumViewer = new Cesium.Viewer(els.cesiumContainer, {
+          // preserveDrawingBuffer lets the Casita Report read the canvas via
+          // scene.canvas.toDataURL() for the photorealistic 3D capture.
+          contextOptions: { webgl: { preserveDrawingBuffer: true } },
           animation: false,
           timeline: false,
           baseLayerPicker: false,
@@ -2548,16 +2729,22 @@
             setReal3dStatus(`A Google 3D tile failed to load: ${err.message || 'see console'}`, true);
           });
           // Sampling `sampleHeightMostDetailed` only works once tiles around
-          // the parcel are streamed in. Retry floor sampling on each tile-load
-          // event (it self-stops once we have a real value). The ADU base is
-          // probed once after initial load, then refined only when the user
-          // moves the ADU — re-probing on every `allTilesLoaded` would spam
-          // the GPU during camera moves and risk render-loop errors.
+          // the parcel are streamed in. `initialTilesLoaded` gets us an early
+          // estimate; `allTilesLoaded` does one final refinement with full-
+          // detail tiles (tracked by `real3dAllTilesRefined` so it fires once).
+          // ADU base is probed once after initial load, then only on moves.
           googleTileset.initialTilesLoaded?.addEventListener?.(() => {
             refreshParcelFloorHeight();
             refineAduBaseFromMesh();
           });
           googleTileset.allTilesLoaded?.addEventListener?.(() => {
+            // On the first allTilesLoaded fire, allow one re-refinement of the
+            // floor height with fully-streamed, higher-detail tiles. The initial
+            // sample from initialTilesLoaded can be off when tiles were sparse.
+            if (!real3dAllTilesRefined) {
+              real3dAllTilesRefined = true;
+              real3dFloorReady = false;
+            }
             refreshParcelFloorHeight();
           });
           cesiumViewer.scene.primitives.add(googleTileset);
@@ -2575,6 +2762,101 @@
       els.aduWindowReal3dBtn.disabled = false;
       els.lockReal3dBtn.disabled = false;
       setReal3dStatus(`Real 3D preview loaded with ${REAL3D_CONTEXT_PAD_M} m of neighborhood context. Boundary and ADU overlays are synced.`);
+    }
+
+    // ── Casita Report: photorealistic 3D capture ─────────────────────────────
+
+    // Make the (normally hidden) Real 3D panel renderable at a fixed pixel size
+    // off-screen, run `fn`, then restore it. The report overlay covers the
+    // screen, so the user never sees the panel. Always restores on completion.
+    async function _withOffscreenReal3d(w, h, fn) {
+      const panel = els.real3dPanel;
+      const wasHidden = panel.hidden;
+      const prevStyle = panel.getAttribute('style') || '';
+      panel.hidden = false;
+      panel.style.cssText += `;position:fixed;left:-12000px;top:0;width:${w}px;height:${h}px;z-index:-1;visibility:visible;`;
+      try {
+        if (cesiumViewer) cesiumViewer.resize();
+        return await fn();
+      } finally {
+        panel.setAttribute('style', prevStyle);
+        panel.hidden = wasHidden;
+        if (cesiumViewer) cesiumViewer.resize();
+      }
+    }
+
+    // Pump synchronous renders until the tileset reports every tile for the
+    // current view is loaded, or the timeout elapses. Resolves to the loaded flag.
+    function _waitReal3dTilesLoaded(timeoutMs = 9000) {
+      return new Promise(resolve => {
+        const start = performance.now();
+        (function tick() {
+          try { cesiumViewer.scene.render(); } catch (_e) { /* transient tile/GPU hiccup */ }
+          const loaded = !!(googleTileset && googleTileset.tilesLoaded);
+          if (loaded || performance.now() - start > timeoutMs) resolve(loaded);
+          else setTimeout(tick, 110);
+        })();
+      });
+    }
+
+    // Ensure viewer + tileset are loaded and overlays synced (panel must already
+    // be sized — call inside _withOffscreenReal3d). Returns true on success.
+    async function ensureReal3dCaptureReady() {
+      if (!siteModel || typeof Cesium === 'undefined' || !getGoogleTilesKey()) return false;
+      await ensureReal3dLoaded();
+      return !!(cesiumViewer && googleTileset && real3dKeyLoaded === getGoogleTilesKey());
+    }
+
+    /**
+     * Orbit the photorealistic Google 3D scene and grab several angles of the
+     * property. Forces full-detail tiles and waits for them to stream in before
+     * each capture. Returns `[{ label, url }]`; throws so the report can fall
+     * back to the massing model.
+     */
+    async function captureReal3dViews() {
+      if (!cesiumViewer || !googleTileset) throw new Error('Real 3D scene not loaded.');
+      const scene = cesiumViewer.scene;
+      const camera = cesiumViewer.camera;
+      const groundH = Number.isFinite(real3dFloorHeightM) ? real3dFloorHeightM : 0;
+      const center = safeCart3Destination(siteLonLat(), groundH);
+      if (!center) throw new Error('Parcel location unavailable.');
+
+      // Frame the orbit radius to the parcel size so the lot fills the view.
+      const ring = siteModel?.parcel?.rings_local?.[0] || [];
+      let span = 32;
+      if (ring.length > 2) {
+        const xs = ring.map(p => p[0]), ys = ring.map(p => p[1]);
+        span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+      }
+      const range = Math.min(190, Math.max(46, span * 1.7));
+      const D = Cesium.Math.toRadians;
+      const views = [
+        { label: 'Aerial',    heading: 20,  pitch: -58, range: range * 1.2 },
+        { label: 'Front',     heading: 20,  pitch: -24, range },
+        { label: 'Left side', heading: 110, pitch: -26, range },
+        { label: 'Rear',      heading: 200, pitch: -27, range },
+      ];
+
+      // Full-detail tiles for crisp captures; restore the streaming profile after.
+      const prevLocked = real3dPreviewLocked;
+      real3dPreviewLocked = true;
+      applyReal3dTileQuality();
+
+      const results = [];
+      try {
+        for (const v of views) {
+          camera.lookAt(center, new Cesium.HeadingPitchRange(D(v.heading), D(v.pitch), v.range));
+          await _waitReal3dTilesLoaded();
+          scene.render();
+          results.push({ label: v.label, url: scene.canvas.toDataURL('image/png') });
+        }
+      } finally {
+        camera.lookAtTransform(Cesium.Matrix4.IDENTITY); // release the orbit frame
+        real3dPreviewLocked = prevLocked;
+        applyReal3dTileQuality();
+        try { flyReal3dToSite(0); } catch (_e) {}
+      }
+      return results;
     }
 
     function installReal3dCameraClamp() {
@@ -3407,23 +3689,141 @@
       return method.replace(/_/g, ' ');
     }
 
+    function computeFinancialScoreClient(aduSqft, aduType, zc, propEstValue) {
+      const costPerSqft = aduType === 'detached' ? 380 : 290;
+      const buildCost = aduSqft * costPerSqft;
+      const rentalListings = (zc && zc.rental_listings) || 0;
+
+      const rentEst = estimateAduRentClient(aduSqft, zc || {});
+      const monthlyRent = rentEst.monthly_rent || 0;
+      const annualRent = monthlyRent * 12;
+
+      const grossYieldPct = buildCost > 0 ? (annualRent / buildCost * 100) : null;
+      const breakevenYears = annualRent > 0 ? (buildCost / annualRent) : null;
+      const investmentRatioPct = (propEstValue && propEstValue > 0) ? (buildCost / propEstValue * 100) : null;
+      const valueUplift = buildCost * 1.3;
+      const newEstValue = propEstValue ? (propEstValue + valueUplift) : null;
+      const helocEquity = propEstValue ? (propEstValue * 0.60) : null;
+      const helocViable = helocEquity != null ? (helocEquity >= buildCost) : null;
+
+      // Score components (matches backend compute_financial_score)
+      const gyPts = Math.min(30, ((grossYieldPct || 0) / 8) * 30);
+
+      let bePts = 0;
+      if (breakevenYears != null) {
+        if (breakevenYears <= 10) bePts = 25;
+        else if (breakevenYears < 20) bePts = Math.max(0, 25 * (20 - breakevenYears) / 10);
+      }
+
+      let irPts = 10; // neutral if unknown
+      if (investmentRatioPct != null) {
+        if (investmentRatioPct <= 15) irPts = 20;
+        else if (investmentRatioPct < 40) irPts = Math.max(0, 20 * (40 - investmentRatioPct) / 25);
+        else irPts = 0;
+      }
+
+      const rdPts = Math.min(25, (rentalListings / 10) * 25);
+      const score = Math.min(100, Math.round((gyPts + bePts + irPts + rdPts) * 10) / 10);
+
+      return {
+        aduSqft, costPerSqft, buildCost, monthlyRent, annualRent,
+        grossYieldPct, breakevenYears, investmentRatioPct,
+        estimatedValue: propEstValue, valueUplift, newEstValue,
+        helocEquity, helocViable, rentalListings,
+        rentMethod: rentEst.method, rentConfidence: rentEst.confidence,
+        score,
+        breakdown: { gyPts: Math.round(gyPts * 10) / 10, bePts: Math.round(bePts * 10) / 10, irPts: Math.round(irPts * 10) / 10, rdPts: Math.round(rdPts * 10) / 10 },
+      };
+    }
+
     function renderFinancing() {
       const aduSqft = (aduState.widthM * aduState.depthM) * M2_TO_FT2;
       const zc = zipContext || {};
-      const rentEst = estimateAduRentClient(aduSqft, zc);
+      // Clear legacy grid classes from old metric layout
+      els.rentCards.className = '';
+      const fa = computeFinancialScoreClient(aduSqft, aduTypeVal, zc, estimatedValue);
 
-      els.rentCards.innerHTML = [
-        metricBlock(formatNumber(aduSqft), 'ADU sqft'),
-        metricBlock(fmtMoney(rentEst.monthly_rent), 'est. rent / mo'),
-        metricBlock(rentEst.monthly_rent ? fmtMoney(rentEst.monthly_rent * 12) : 'N/A', 'est. rent / yr'),
-      ].join('');
+      const score = fa.score;
+      const scoreLabel = score >= 80 ? 'Excellent' : score >= 65 ? 'Strong' : score >= 50 ? 'Solid' : score >= 35 ? 'Moderate' : 'Low Return';
+      const scoreColor = score >= 80 ? '#059669' : score >= 65 ? '#0891b2' : score >= 50 ? '#d97706' : score >= 35 ? '#ea580c' : '#dc2626';
+
+      const fmt = fmtMoney;
+      const fmtK = v => v == null ? 'N/A' : (v >= 1000000 ? '$' + (v / 1000000).toFixed(2) + 'M' : '$' + Math.round(v / 1000) + 'k');
+      const fmtYr = v => v == null ? 'N/A' : v.toFixed(1) + ' yrs';
+      const fmtPctLocal = v => v == null ? 'N/A' : v.toFixed(1) + '%';
+
+      const helocHtml = fa.helocViable == null
+        ? `<div class="fin-heloc-badge fin-heloc-unknown">No property value data for HELOC estimate</div>`
+        : fa.helocViable
+          ? `<div class="fin-heloc-badge fin-heloc-yes">HELOC viable — available equity covers build cost</div>`
+          : `<div class="fin-heloc-badge fin-heloc-no">HELOC may not cover full build cost</div>`;
+
+      const propValueHtml = fa.estimatedValue
+        ? `<div class="fin-rows">
+            <div class="fin-row"><span>Current estimated value</span><strong>${fmt(fa.estimatedValue)}</strong></div>
+            <div class="fin-row"><span>ADU value uplift (1.3× build)</span><strong>+${fmtK(fa.valueUplift)}</strong></div>
+            <div class="fin-row fin-row-after"><span>After ADU (estimate)</span><strong>~${fmt(fa.newEstValue)}</strong></div>
+          </div>
+          <div class="fin-rows" style="margin-top:10px;">
+            <div class="fin-row"><span>Available equity at 60% LTV</span><strong>${fmt(fa.helocEquity)}</strong></div>
+          </div>
+          ${helocHtml}`
+        : `<div class="fin-no-value">Property value not available from Realtor.com — HELOC and value uplift estimates unavailable.</div>`;
+
+      const bd = fa.breakdown;
+      const breakdownHtml = `<div class="fin-score-breakdown">Yield ${bd.gyPts}pt · Breakeven ${bd.bePts}pt · Ratio ${bd.irPts}pt · Demand ${bd.rdPts}pt</div>`;
+
+      const costHint = `${formatNumber(Math.round(aduSqft))} sqft @ $${fa.costPerSqft}/sqft (${aduTypeVal})`;
+      const rentHint = fa.rentalListings > 0
+        ? `${fa.rentalListings} rental comp${fa.rentalListings > 1 ? 's' : ''} in zip ${zc.zip_code || ''}`
+        : 'No local rental comps';
+
+      els.rentCards.innerHTML = `
+        <div class="fin-score-bar">
+          <div class="fin-score-circle" style="--score-color:${scoreColor}">
+            <span class="fin-score-num">${score}</span>
+            <span class="fin-score-denom">/100</span>
+          </div>
+          <div class="fin-score-info">
+            <div class="fin-score-label" style="color:${scoreColor}">${scoreLabel} Investment</div>
+            <div class="fin-track"><div class="fin-track-fill" style="width:${score}%;background:${scoreColor}"></div></div>
+            ${breakdownHtml}
+          </div>
+        </div>
+
+        <div class="fin-section-title">Build &amp; Income</div>
+        <div class="fin-metrics">
+          <div class="fin-metric">
+            <div class="fin-metric-val">${fmtK(fa.buildCost)}</div>
+            <div class="fin-metric-key">Build cost</div>
+            <div class="fin-metric-hint">${costHint}</div>
+          </div>
+          <div class="fin-metric">
+            <div class="fin-metric-val">${fa.monthlyRent ? fmt(fa.monthlyRent) : 'N/A'}</div>
+            <div class="fin-metric-key">Monthly rent</div>
+            <div class="fin-metric-hint">${rentHint}</div>
+          </div>
+          <div class="fin-metric">
+            <div class="fin-metric-val">${fmtPctLocal(fa.grossYieldPct)}</div>
+            <div class="fin-metric-key">Gross yield</div>
+            <div class="fin-metric-hint">Annual rent ÷ build cost</div>
+          </div>
+          <div class="fin-metric">
+            <div class="fin-metric-val">${fmtYr(fa.breakevenYears)}</div>
+            <div class="fin-metric-key">Breakeven</div>
+            <div class="fin-metric-hint">At projected rent</div>
+          </div>
+        </div>
+
+        <div class="fin-section-title">Property Value</div>
+        ${propValueHtml}
+      `;
 
       const basis = zc.rental_listings
         ? `Based on ${zc.rental_listings} rental listing(s) in zip ${zc.zip_code || 'N/A'} (HomeHarvest / Realtor.com)`
         : (zc.zip_code ? `No rental listings found in zip ${zc.zip_code} via HomeHarvest` : 'Load a site to fetch rent comps');
-      const psf = zc.rent_per_sqft ? ` · avg $${zc.rent_per_sqft}/sqft` : '';
-      els.financingNote.textContent =
-        `${basis}${psf}. Estimate uses ${rentMethodLabel(rentEst.method)} (${rentEst.confidence} confidence).`;
+      const psf = zc.rent_per_sqft ? ` · $${zc.rent_per_sqft}/sqft avg` : '';
+      els.financingNote.textContent = `${basis}${psf}. Updates live as you resize the ADU.`;
     }
 
     // ── URL state (shareable links) ───────────────────────────────────────────
@@ -3571,9 +3971,10 @@
 
     function onAduStyleChanged() {
       persistAduStyle();
-      // Only rebuild if the Real 3D scene is actually up — otherwise the next
-      // syncReal3dAdu() call will pick up the new style automatically.
-      if (cesiumViewer && siteModel) syncReal3dAdu();
+      // Redraw with current base height — no new mesh probe. Style changes
+      // don't move the ADU footprint, so re-probing risks returning a slightly
+      // different tile-sample height and causing the ADU to visibly float.
+      if (cesiumViewer && siteModel) renderAduAtCurrentBase();
     }
 
     const styleColorBindings = [
@@ -3612,6 +4013,7 @@
       // attached / JADU types land in the right place, not the generic
       // top-scored detached placement.
       if (!siteModel) return;
+      aduManuallyMoved = false; // snap overwrites the manual position
       if (aduTypeVal === 'attached') {
         snapInitialToWall();
       } else if (aduTypeVal === 'jadu') {
@@ -3628,6 +4030,7 @@
     });
     els.rotation.addEventListener('input', () => {
       aduState.rot = Number(els.rotation.value);
+      aduManuallyMoved = true;
       rebuildAdu();
     });
     els.aduWidth.addEventListener('input', updateAduSizeFromInputs);
@@ -3694,24 +4097,35 @@
 
     // Background re-fetch: updates siteModel + renders limits/picker WITHOUT navigating.
     // Used by the standards toggle and floors toggle so they don't hijack the wizard step.
+    let _constraintRefreshCtrl = null;
     async function _refreshConstraints() {
       if (!siteModel || !els.address.value.trim()) return;
+      // Cancel any in-flight refresh so a stale response can't overwrite a newer one
+      _constraintRefreshCtrl?.abort();
+      _constraintRefreshCtrl = new AbortController();
+      const { signal } = _constraintRefreshCtrl;
+
       const w = Number(els.sidebarWidth?.value || els.aduWidth.value) || 30;
       const d = Number(els.sidebarDepth?.value || els.aduDepth.value) || 40;
       const h = currentAduHeightFt();
+      // Snapshot the values we're requesting so we can verify they're still current on response
+      const reqStandards = standardsVal;
+      const reqType = aduTypeVal;
       try {
         const data = await postJson('/api/site', {
           city: getSelectedCity(),
           address: els.address.value.trim(),
           include_checklist: true,
-          standards: standardsVal,
-          adu_type: aduTypeVal,
+          standards: reqStandards,
+          adu_type: reqType,
           adu_stories: currentFloors,
           adu_width_ft: w,
           adu_depth_ft: d,
           adu_height_ft: h,
           front_edge_index: selectedFrontEdgeIdx,
-        });
+        }, signal);
+        // Discard if the user changed standards/type again while this was in flight
+        if (standardsVal !== reqStandards || aduTypeVal !== reqType) return;
         if (data.site_model) siteModel = data.site_model;
         if (data.property_stats) propertyStats = data.property_stats;
         const items = data.checklist?.items || [];
@@ -3729,6 +4143,7 @@
         const checklistStep = document.getElementById('stepChecklist');
         if (checklistStep && !checklistStep.hidden) renderFullChecklist(_allChecklistItems);
       } catch (err) {
+        if (err.name === 'AbortError') return; // superseded by a newer toggle — not an error
         _markReqsStale();
         setStatus(err.message || 'Rules refresh failed — requirements may be stale.', 'err');
       }
@@ -3999,10 +4414,18 @@
         const fp = document.getElementById('financingPanel');
         if (fp) fp.hidden = false;
         renderFinancing();
+        if (_lastSiteData) {
+          const cta = document.getElementById('generateReportCta');
+          if (cta) cta.hidden = false;
+        }
       }
     }
 
     // ── Wizard button wiring ─────────────────────────────────────────────────
+
+    document.getElementById('generateReportBtn')?.addEventListener('click', openCasitaReport);
+    document.getElementById('crCloseBtn')?.addEventListener('click', closeCasitaReport);
+    document.getElementById('crPrintBtn')?.addEventListener('click', () => window.print());
 
     // Front edge picker skip
     document.getElementById('frontEdgeSkipBtn')?.addEventListener('click', () => {
@@ -4058,6 +4481,7 @@
             adu_height_ft: curH,
             front_edge_index: selectedFrontEdgeIdx,
           });
+          _lastSiteData = data;
           _allChecklistItems = data.checklist?.items || [];
           _checklistDims = {
             w: curW,
@@ -4072,6 +4496,7 @@
             propertyStats = data.property_stats || propertyStats;
             zipContext = data.zip_context || zipContext;
             financing = data.financing || financing;
+            if (data.property_stats?.estimated_value != null) estimatedValue = data.property_stats.estimated_value;
             _updateHeightSlider(aduTypeVal, currentFloors);
             buildScene({ preserveDimensions: true });
             renderSidebarLimits(aduTypeVal);
@@ -4342,3 +4767,566 @@
       return typeof d === 'string' ? d : 'Could not add plan.';
     }
 
+
+    // ── Casita Report ──────────────────────────────────────────────────────────
+
+    function openCasitaReport() {
+      if (!_lastSiteData) { alert('No site data loaded. Analyze a property first.'); return; }
+      const overlay = document.getElementById('casitaReportOverlay');
+      const article = document.getElementById('casitaReportArticle');
+      if (!overlay || !article) return;
+      article.innerHTML = _buildReportHtml(_lastSiteData);
+      overlay.removeAttribute('hidden');
+      document.body.style.overflow = 'hidden';
+      function _escHandler(e) {
+        if (e.key === 'Escape') { closeCasitaReport(); document.removeEventListener('keydown', _escHandler); }
+      }
+      document.addEventListener('keydown', _escHandler);
+    }
+
+    function closeCasitaReport() {
+      const overlay = document.getElementById('casitaReportOverlay');
+      if (overlay) overlay.hidden = true;
+      document.body.style.overflow = '';
+    }
+
+    function _buildSiteDiagramSvg() {
+      const sm = siteModel;
+      if (!sm?.parcel?.rings_local?.[0]) return '<p style="color:var(--text-faint);font-size:13px;padding:16px;">Site geometry unavailable.</p>';
+
+      const SVG_W = 540, SVG_H = 470, PAD = 16, LEGEND_H = 30, MARGIN = 38;
+      const frameX0 = PAD, frameY0 = PAD;
+      const frameW = SVG_W - PAD * 2;
+      const frameH = SVG_H - PAD * 2 - LEGEND_H;
+      const parcelRing = sm.parcel.rings_local[0];
+
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      parcelRing.forEach(([x, y]) => {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      });
+
+      const rangeX = maxX - minX || 1;
+      const rangeY = maxY - minY || 1;
+      const usableW = frameW - MARGIN * 2;
+      const usableH = frameH - MARGIN * 2;
+      const scale = Math.min(usableW / rangeX, usableH / rangeY);
+      const offsetX = frameX0 + MARGIN + (usableW - rangeX * scale) / 2;
+      const offsetY = frameY0 + MARGIN + (usableH - rangeY * scale) / 2;
+
+      function toSvg(x, y) {
+        return [offsetX + (x - minX) * scale, offsetY + (maxY - y) * scale];
+      }
+      function ringToPoints(ring) {
+        return ring.map(([x, y]) => toSvg(x, y).join(',')).join(' ');
+      }
+      // Apply the user's "Edit Position" move/rotate of the existing structure,
+      // mirroring transformRing() so the report matches what they built in 3D.
+      const hs = houseState || { x: 0, y: 0, rot: 0 };
+      function houseRing(ring) {
+        const a = THREE.MathUtils.degToRad(hs.rot || 0);
+        const ca = Math.cos(a), sa = Math.sin(a);
+        return ring.map(([x, y]) => [x * ca - y * sa + (hs.x || 0), x * sa + y * ca + (hs.y || 0)]);
+      }
+      function centroidSvg(ringPts) {
+        let sx = 0, sy = 0;
+        for (const [x, y] of ringPts) { sx += x; sy += y; }
+        const cx = sx / ringPts.length, cy = sy / ringPts.length;
+        return toSvg(cx, cy);
+      }
+      const fmtSf = v => Math.round(v).toLocaleString();
+      // White-haloed label so text stays legible over the aerial imagery.
+      function haloText(x, y, text, { size = 10, weight = 600, fill = '#fff', anchor = 'middle', rot = null, dark = false } = {}) {
+        const t = rot != null ? ` transform="rotate(${rot},${x},${y})"` : '';
+        const halo = dark ? '#f8fafc' : '#0f172a';
+        return `<text x="${x}" y="${y}" text-anchor="${anchor}" dominant-baseline="middle" font-size="${size}" font-weight="${weight}" fill="${fill}" style="paint-order:stroke" stroke="${halo}" stroke-width="${Math.max(2, size * 0.3)}" stroke-linejoin="round"${t}>${text}</text>`;
+      }
+      function pill(x, y, text, accent) {
+        const w = text.length * 5.4 + (accent ? 24 : 14);
+        return `<g transform="translate(${x},${y})">
+          <rect x="0" y="0" width="${w.toFixed(1)}" height="18" rx="9" fill="rgba(15,23,42,0.74)"/>
+          ${accent ? `<circle cx="10" cy="9" r="3.6" fill="${accent}"/>` : ''}
+          <text x="${accent ? 18 : 7}" y="9.6" dominant-baseline="middle" font-size="9.5" font-weight="600" fill="#fff">${text}</text>
+        </g>`;
+      }
+
+      // ── Satellite underlay ──────────────────────────────────────────────
+      const imagery = sm.imagery || {};
+      const sat = imagery.basemaps?.satellite?.url_image || imagery.url_image || null;
+      const corners = imagery.corners_local_m;
+      const hasSat = !!(sat && Array.isArray(corners) && corners.length === 4);
+      const clipId = 'crFrameClip';
+      let layers = '';
+
+      if (hasSat) {
+        const xs = corners.map(c => c[0]); const ys = corners.map(c => c[1]);
+        const imgMinX = Math.min(...xs), imgMaxX = Math.max(...xs);
+        const imgMinY = Math.min(...ys), imgMaxY = Math.max(...ys);
+        const [tlx, tly] = toSvg(imgMinX, imgMaxY); // NW → top-left (north-up)
+        const [brx, bry] = toSvg(imgMaxX, imgMinY); // SE → bottom-right
+        layers += `<image href="${escapeHtml(sat)}" x="${tlx.toFixed(2)}" y="${tly.toFixed(2)}" width="${(brx - tlx).toFixed(2)}" height="${(bry - tly).toFixed(2)}" preserveAspectRatio="none"/>`;
+        // Spotlight: darken everything outside the parcel so the lot pops.
+        layers += `<path d="M ${frameX0} ${frameY0} H ${frameX0 + frameW} V ${frameY0 + frameH} H ${frameX0} Z M ${ringToPoints(parcelRing).replace(/ /g, ' L ').replace(/,/g, ' ')} Z" fill="rgba(2,6,23,0.46)" fill-rule="evenodd"/>`;
+      } else {
+        layers += `<rect x="${frameX0}" y="${frameY0}" width="${frameW}" height="${frameH}" fill="#EAEFEA"/>`;
+      }
+
+      let out = '';
+
+      // 1. Parcel — bright outline (fill only when there is no aerial beneath)
+      out += `<polygon points="${ringToPoints(parcelRing)}" fill="${hasSat ? 'none' : '#FEF9C3'}" stroke="#FBBF24" stroke-width="2.4" stroke-linejoin="round"/>`;
+
+      // 2. Setback-eroded boundary (dashed inner ring)
+      for (const poly of sm.buildable_zone?.parcel_eroded_polygons || []) {
+        const r = poly.rings_local?.[0];
+        if (r) out += `<polygon points="${ringToPoints(r)}" fill="none" stroke="#FCD34D" stroke-width="1.1" stroke-dasharray="5,3" opacity="0.9"/>`;
+      }
+
+      // 3. Buildable zone (reflects live house position via _buildableRings)
+      const bzRings = sm._buildableRings
+        || (sm.buildable_zone?.polygons || []).map(p => p.rings_local);
+      for (const rings of bzRings) {
+        const r = Array.isArray(rings[0]?.[0]) ? rings[0] : rings;
+        if (r?.length) out += `<polygon points="${ringToPoints(r)}" fill="rgba(13,148,136,0.30)" stroke="rgba(45,212,191,0.95)" stroke-width="1.3"/>`;
+      }
+
+      // 4. Existing buildings — moved/rotated per houseState, labeled with sqft
+      for (const b of sm.buildings || []) {
+        const r = b.rings_local?.[0];
+        if (!r) continue;
+        const moved = houseRing(r);
+        out += `<polygon points="${moved.map(([x, y]) => toSvg(x, y).join(',')).join(' ')}"
+          fill="${hasSat ? 'rgba(30,41,59,0.62)' : '#374151'}" stroke="#F1F5F9" stroke-width="1.3" stroke-linejoin="round"/>`;
+        const area = Number(b.area_ft2 || 0);
+        if (area > 120) {
+          const [lx, ly] = centroidSvg(moved);
+          out += haloText(lx, ly, `${fmtSf(area)} sf`, { size: 9.5, weight: 700 });
+        }
+      }
+
+      // 5. ADU footprint — projected from data-space corners (the same
+      // aduCorners() the 3D scene uses), so its orientation matches the model
+      // exactly and aligns with the parcel/buildings/buildable zone. Drawing an
+      // SVG-space rect + rotate() instead would mis-sign the angle under the
+      // Y-flip and slant the ADU relative to the rest of the plan.
+      const aduAreaFt2 = aduState.widthM * aduState.depthM * M2_TO_FT2;
+      if (sm.adu || aduState.widthM) {
+        const aduPts = aduCorners(aduState.x, aduState.y, aduState.rot || 0).map(([x, y]) => toSvg(x, y));
+        out += `<polygon points="${aduPts.map(p => p.join(',')).join(' ')}"
+          fill="#0D9488" fill-opacity="0.92" stroke="#99F6E4" stroke-width="1.8" stroke-linejoin="round"/>`;
+        // Labels stay horizontal at the footprint center — legible at any ADU angle.
+        const [acx, acy] = toSvg(aduState.x, aduState.y);
+        out += `<text x="${acx}" y="${acy - 5}" text-anchor="middle" dominant-baseline="middle"
+          fill="#fff" font-size="10" font-weight="700" letter-spacing="0.05em"
+          style="paint-order:stroke" stroke="#0F766E" stroke-width="2.6" stroke-linejoin="round">ADU</text>`;
+        out += `<text x="${acx}" y="${acy + 7}" text-anchor="middle" dominant-baseline="middle"
+          fill="#CCFBF1" font-size="8.5" font-weight="600"
+          style="paint-order:stroke" stroke="#0F766E" stroke-width="2" stroke-linejoin="round">${fmtSf(aduAreaFt2)} sf</text>`;
+      }
+
+      // 6. Setback dimension annotations
+      const cons = sm.applied_constraints || {};
+      function drawSetbackAnnotation(p1, p2, setbackM, label) {
+        if (!setbackM || setbackM <= 0) return;
+        const [ax, ay] = toSvg(p1[0], p1[1]);
+        const [bx, by] = toSvg(p2[0], p2[1]);
+        const mx = (ax + bx) / 2;
+        const my = (ay + by) / 2;
+        const edgeLen = Math.sqrt((bx - ax) ** 2 + (by - ay) ** 2) || 1;
+        let nx = -(by - ay) / edgeLen;
+        let ny = (bx - ax) / edgeLen;
+        const [cxP, cyP] = toSvg(0, 0);
+        if ((cxP - mx) * nx + (cyP - my) * ny < 0) { nx = -nx; ny = -ny; }
+        const arrowLen = setbackM * scale;
+        const ex = mx + nx * arrowLen;
+        const ey = my + ny * arrowLen;
+        const tickSize = 5;
+        out += `<line x1="${mx}" y1="${my}" x2="${ex}" y2="${ey}" stroke="#FDE68A" stroke-width="1.4" stroke-dasharray="3,2"/>`;
+        out += `<line x1="${mx - nx * tickSize}" y1="${my - ny * tickSize}" x2="${mx + nx * tickSize}" y2="${my + ny * tickSize}" stroke="#FDE68A" stroke-width="1.6"/>`;
+        out += `<line x1="${ex - nx * tickSize}" y1="${ey - ny * tickSize}" x2="${ex + nx * tickSize}" y2="${ey + ny * tickSize}" stroke="#FDE68A" stroke-width="1.6"/>`;
+        const textX = mx + nx * (arrowLen / 2);
+        const textY = my + ny * (arrowLen / 2);
+        const angle = Math.atan2(ny, nx) * 180 / Math.PI;
+        const textAngle = Math.abs(angle) > 90 ? angle + 180 : angle;
+        out += haloText(textX, textY, label, { size: 9, weight: 700, fill: '#FEF3C7', rot: textAngle - 90 });
+      }
+
+      const ring = parcelRing;
+      const n = ring.length;
+      const annotated = new Set();
+      const sideSetFt = cons.min_side_setback_ft;
+      const rearSetFt = cons.min_rear_setback_ft;
+      const frontSetFt = cons.front_setback_ft;
+      const sideSetM = sideSetFt ? sideSetFt * 0.3048 : 0;
+      const rearSetM = rearSetFt ? rearSetFt * 0.3048 : 0;
+      const frontSetM = frontSetFt ? frontSetFt * 0.3048 : 0;
+
+      let longestIdx = 0, longestLen = 0;
+      for (let i = 0; i < n - 1; i++) {
+        const dx = ring[i + 1][0] - ring[i][0];
+        const dy = ring[i + 1][1] - ring[i][1];
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len > longestLen) { longestLen = len; longestIdx = i; }
+      }
+      const frontIdx = selectedFrontEdgeIdx ?? longestIdx;
+      const rearIdx = (frontIdx + Math.floor(n / 2)) % (n - 1);
+
+      if (rearSetM > 0) {
+        drawSetbackAnnotation(ring[rearIdx], ring[(rearIdx + 1) % (n - 1)], rearSetM, `${rearSetFt} ft`);
+        annotated.add(rearIdx);
+      }
+      if (sideSetM > 0) {
+        for (let i = 0; i < n - 1; i++) {
+          if (i === frontIdx || i === rearIdx || annotated.has(i)) continue;
+          drawSetbackAnnotation(ring[i], ring[(i + 1) % (n - 1)], sideSetM, `${sideSetFt} ft`);
+          break;
+        }
+      }
+      if (frontSetM > 0) {
+        drawSetbackAnnotation(ring[frontIdx], ring[(frontIdx + 1) % (n - 1)], frontSetM, `${frontSetFt} ft`);
+      }
+
+      // 7. Area pills (top of frame)
+      const buildableFt2 = sm._buildableArea_ft2 ?? sm.buildable_zone?.area_ft2;
+      out += pill(frameX0 + 8, frameY0 + 8, `Lot ${fmtSf(sm.parcel.area_ft2)} sf`, '#FBBF24');
+      if (buildableFt2 != null) {
+        const lotW = (`Lot ${fmtSf(sm.parcel.area_ft2)} sf`).length * 5.4 + 24;
+        out += pill(frameX0 + 8 + lotW + 8, frameY0 + 8, `Buildable ${fmtSf(buildableFt2)} sf`, '#2DD4BF');
+      }
+
+      // 8. North arrow (top-right, inside frame)
+      const naX = frameX0 + frameW - 18, naY = frameY0 + 22;
+      out += `<g transform="translate(${naX},${naY})">
+        <polygon points="0,-13 4.5,5 0,1.5 -4.5,5" fill="#fff" stroke="#0f172a" stroke-width="0.8" stroke-linejoin="round"/>
+        ${haloText(0, 14, 'N', { size: 10, weight: 700 })}
+      </g>`;
+
+      // 9. Scale bar (bottom-left, inside frame)
+      const target = 95;
+      const niceVals = [1, 2, 3, 5, 10, 15, 20, 30, 50];
+      const scaleBarM = niceVals.reduce((best, v) => Math.abs(v * scale - target) < Math.abs(best * scale - target) ? v : best, niceVals[0]);
+      const scaleBarPx = scaleBarM * scale;
+      const sbX = frameX0 + 14, sbY = frameY0 + frameH - 16;
+      out += `<line x1="${sbX}" y1="${sbY}" x2="${sbX + scaleBarPx}" y2="${sbY}" stroke="#fff" stroke-width="3"/>`;
+      out += `<line x1="${sbX}" y1="${sbY}" x2="${sbX + scaleBarPx}" y2="${sbY}" stroke="#0f172a" stroke-width="1.4"/>`;
+      out += `<line x1="${sbX}" y1="${sbY - 4}" x2="${sbX}" y2="${sbY + 4}" stroke="#fff" stroke-width="2.5"/>`;
+      out += `<line x1="${sbX + scaleBarPx}" y1="${sbY - 4}" x2="${sbX + scaleBarPx}" y2="${sbY + 4}" stroke="#fff" stroke-width="2.5"/>`;
+      out += haloText(sbX + scaleBarPx / 2, sbY + 11, `${Math.round(scaleBarM * 3.28084)} ft`, { size: 9, weight: 600 });
+
+      // 10. Legend strip (below the map frame, on the card background)
+      let legendOut = '';
+      const lgY = SVG_H - 11;
+      const legend = [
+        { color: 'none', stroke: '#D97706', label: 'Parcel' },
+        { color: '#475569', stroke: '#1F2937', label: 'Existing' },
+        { color: 'rgba(13,148,136,0.5)', stroke: '#0D9488', label: 'Buildable' },
+        { color: '#0D9488', stroke: '#0F766E', label: 'Proposed ADU' },
+      ];
+      let lgX = frameX0 + 2;
+      for (const { color, stroke, label } of legend) {
+        legendOut += `<rect x="${lgX}" y="${lgY - 9}" width="13" height="11" fill="${color}" stroke="${stroke}" stroke-width="1.4" rx="2"/>`;
+        legendOut += `<text x="${lgX + 17}" y="${lgY - 2}" font-size="9.5" fill="#475569" font-weight="500">${label}</text>`;
+        lgX += label.length * 5.9 + 30;
+      }
+
+      // Aerial + spotlight + all in-frame geometry are clipped to the rounded
+      // map frame; the border, frame outline, and legend sit on top / below it.
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${SVG_W} ${SVG_H}" width="${SVG_W}" height="${SVG_H}" style="font-family:system-ui,sans-serif;display:block;width:100%;height:auto">
+        <defs><clipPath id="${clipId}"><rect x="${frameX0}" y="${frameY0}" width="${frameW}" height="${frameH}" rx="8"/></clipPath></defs>
+        <rect width="${SVG_W}" height="${SVG_H}" fill="#F8FAFC" rx="8"/>
+        <g clip-path="url(#${clipId})">${layers}${out}</g>
+        <rect x="${frameX0}" y="${frameY0}" width="${frameW}" height="${frameH}" fill="none" stroke="#CBD5E1" stroke-width="1" rx="8"/>
+        ${legendOut}
+      </svg>`;
+    }
+
+    // Multi-angle 3D renders for the report. Returns '' when no scene is built
+    // so the section is silently omitted rather than showing an empty block.
+    function _build3dViewsHtml() {
+      let views = [];
+      try { views = capture3dViews(); } catch (err) { debugWarn('3D capture threw:', err); }
+      if (!views.length) return '';
+      const cells = views.map(v => `
+        <figure class="cr-view">
+          <img src="${v.url}" alt="${escapeHtml(v.label)} view of the modeled site"/>
+          <figcaption>${escapeHtml(v.label)} view</figcaption>
+        </figure>`).join('');
+      return `
+<!-- 6b. 3D Model Views -->
+<div class="cr-section">
+  <div class="cr-section-title">3D Model Views</div>
+  <p class="cr-section-note">Rendered from your configured model — existing structure, buildable envelope, and the proposed ADU in place.</p>
+  <div class="cr-views-grid">${cells}</div>
+</div>`;
+    }
+
+    function _buildReportHtml(d) {
+      const eh = escapeHtml;
+      const fmt = fmtMoney;
+      const fmtPctR = v => (v == null || Number.isNaN(+v) ? 'N/A' : (+v).toFixed(1) + '%');
+      const fmtN  = v => (v == null ? '—' : Math.round(+v).toLocaleString());
+      const fmtYr = v => (v == null ? 'N/A' : (+v).toFixed(1) + ' yrs');
+      const dateStr = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+      const sm   = siteModel || d.site_model || {};
+      const par  = sm.parcel || {};
+      const bz   = sm.buildable_zone || {};
+      const cons = sm.applied_constraints || {};
+      const zon  = d.zoning?.district || {};
+      const gp   = d.zoning?.general_plan || {};
+      const des  = d.zoning?.designations || {};
+      const ps   = propertyStats || d.property_stats || {};
+      const zc   = zipContext || d.zip_context || {};
+      const fin  = financing || d.financing || {};
+      const fa   = d.financial_analysis || {};
+      const perms = d.permits || {};
+      const ce   = d.code_enforcement || {};
+      const items = _allChecklistItems.length ? _allChecklistItems : (d.checklist?.items || []);
+      const warns = d.data_warnings || [];
+      const jobId = d.job_id || '—';
+      const address = d.address || par.site_address || '—';
+
+      // Score
+      const scorable = items.filter(i => ['pass','fail','verify','unavailable'].includes(i.status));
+      const scoreRaw = scorable.length
+        ? scorable.reduce((s, i) => s + (i.status === 'pass' ? 1 : i.status === 'verify' ? 0.5 : 0), 0) / scorable.length * 100
+        : (fa.score ?? 0);
+      const score = Math.round(scoreRaw);
+      const scoreColor = score >= 80 ? '#059669' : score >= 65 ? '#0891b2' : score >= 45 ? '#D97706' : '#DC2626';
+      const scoreLabel = score >= 80 ? 'Excellent' : score >= 65 ? 'Good' : score >= 45 ? 'Fair' : 'Needs Review';
+      const counts = { pass: 0, verify: 0, fail: 0, unavailable: 0 };
+      items.forEach(i => { if (i.status in counts) counts[i.status]++; });
+
+      // Build cost
+      const aduSqft = aduState.widthM * aduState.depthM * M2_TO_FT2;
+      const cpsq = aduTypeVal === 'jadu' ? 200 : aduTypeVal === 'attached' ? 290 : 380;
+      const totalCost = Math.round(aduSqft * cpsq);
+      const hardCost  = Math.round(totalCost * 0.80);
+      const softCost  = Math.round(totalCost * 0.20);
+      const monthlyRent = fin.monthly_rent || estimateAduRentClient(aduSqft, zc).monthly_rent;
+
+      // Checklist grouped
+      const partGroups = new Map();
+      items.forEach(item => {
+        const p = item.part ?? 0;
+        if (!partGroups.has(p)) partGroups.set(p, []);
+        partGroups.get(p).push(item);
+      });
+      const checklistHtml = [...partGroups.entries()].sort((a, b) => a[0] - b[0]).map(([p, pItems]) => {
+        const rows = pItems.map(item => {
+          const icon = _CHECK_ICONS[item.status] || '?';
+          const st = item.status || 'unavailable';
+          return `<div class="cr-check-row">
+            <div class="cr-check-icon ${eh(st)}">${icon}</div>
+            <div>
+              <div class="cr-check-q">${item.number != null ? `Q${item.number} · ` : ''}${eh(item.question || '')}</div>
+              ${item.detail ? `<div class="cr-check-detail">${eh(item.detail)}</div>` : ''}
+              ${item.source ? `<div class="cr-check-source">Source: ${eh(item.source)}</div>` : ''}
+            </div>
+          </div>`;
+        }).join('');
+        return `<div class="cr-checklist-group">
+          <div class="cr-checklist-group-title">${eh(_PART_LABELS[p] || `Part ${p}`)}</div>
+          ${rows}
+        </div>`;
+      }).join('');
+
+      // Permits
+      const permitRows = (perms.records || [])
+        .slice().sort((a, b) => (b.issue_date || b.final_date || '').localeCompare(a.issue_date || a.final_date || ''))
+        .map(r => {
+          const stColor = (r.status || '').toLowerCase().includes('final') ? 'var(--ok)' : 'var(--warn)';
+          return `<tr>
+            <td style="white-space:nowrap;color:var(--text-soft)">${eh(r.issue_date || r.final_date || '—')}</td>
+            <td style="font-family:monospace;font-size:11px">${eh(r.folder_num || '—')}</td>
+            <td>${eh(r.work_desc || '—')}${r.sub_desc ? `<div style="font-size:11px;color:var(--text-faint)">${eh(r.sub_desc)}</div>` : ''}</td>
+            <td><strong style="color:${stColor}">${eh(r.status || '—')}</strong></td>
+          </tr>`;
+        }).join('');
+
+      // Flags
+      function flag(label, icon, desObj) {
+        const present = desObj?.present;
+        const cls = present == null ? 'unknown' : present ? 'flagged' : 'clear';
+        const txt = present == null ? 'Unknown' : present ? 'Present' : 'Clear';
+        return `<div class="cr-flag ${cls}">
+          <div class="cr-flag-icon">${icon}</div>
+          <div class="cr-flag-label">${label}</div>
+          <div class="cr-flag-status">${txt}</div>
+          ${present && desObj.detail ? `<div class="cr-flag-detail">${eh(desObj.detail)}</div>` : ''}
+        </div>`;
+      }
+
+      const ceFlag = `<div class="cr-flag ${ce.has_issues ? 'flagged' : 'clear'}">
+        <div class="cr-flag-icon">${ce.has_issues ? '⚠' : '✓'}</div>
+        <div class="cr-flag-label">Code Enf.</div>
+        <div class="cr-flag-status">${ce.has_issues ? `${ce.total_count} issue${ce.total_count !== 1 ? 's' : ''}` : 'Clear'}</div>
+      </div>`;
+
+      // Rent table
+      const rentRows = (zc.rent_breakdown || []).map(r => `<tr>
+        <td>${r.bedrooms === 0 ? 'Studio' : `${r.bedrooms} BR`}</td>
+        <td>${r.avg_rent ? fmt(r.avg_rent) : '—'}</td>
+        <td>${r.median_rent ? fmt(r.median_rent) : '—'}</td>
+        <td style="color:var(--text-faint)">${r.count || '—'}</td>
+      </tr>`).join('');
+
+      return `
+<!-- 1. Header -->
+<div class="cr-header">
+  <div class="cr-header-eyebrow">Casita · ADU Feasibility Report</div>
+  <div class="cr-header-address" id="crReportTitle">${eh(address)}</div>
+  <div class="cr-header-meta">
+    <span>Generated: <strong>${dateStr}</strong></span>
+    <span>Job: <strong>${eh(jobId)}</strong></span>
+    <span>ADU: <strong>${eh(sm.adu_type || aduTypeVal || '—')}</strong></span>
+    <span>Standards: <strong>${eh(sm.standards || standardsVal || '—')}</strong></span>
+  </div>
+</div>
+
+<!-- 2. Score -->
+<div class="cr-section">
+  <div class="cr-section-title">ADU Readiness Score</div>
+  <div class="cr-score-bar">
+    <div class="cr-score-number" style="color:${scoreColor}">${score}</div>
+    <div class="cr-score-info">
+      <div class="cr-score-label" style="color:${scoreColor}">${scoreLabel}</div>
+      <div class="cr-score-track"><div class="cr-score-fill" style="width:${score}%;background:${scoreColor}"></div></div>
+      <div class="cr-score-pills">
+        ${counts.pass ? `<span class="cr-pill pass">✓ ${counts.pass} Pass</span>` : ''}
+        ${counts.verify ? `<span class="cr-pill verify">! ${counts.verify} Verify</span>` : ''}
+        ${counts.fail ? `<span class="cr-pill fail">✗ ${counts.fail} Fail</span>` : ''}
+        ${counts.unavailable ? `<span class="cr-pill unavail">– ${counts.unavailable} N/A</span>` : ''}
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 3. Property Overview -->
+<div class="cr-section">
+  <div class="cr-section-title">Property Overview</div>
+  <div class="cr-grid">
+    <div class="cr-kv"><div class="cr-kv-label">APN</div><div class="cr-kv-value" style="font-size:15px">${eh(par.apn || '—')}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Estimated Value</div><div class="cr-kv-value">${ps.estimated_value ? fmt(ps.estimated_value) : '—'}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Lot Size</div><div class="cr-kv-value">${fmtN(par.area_ft2)} <span style="font-size:12px;font-weight:500;color:var(--text-soft)">sqft</span></div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Buildable Zone</div><div class="cr-kv-value">${sm.buildable_zone ? fmtN(sm._buildableArea_ft2 || bz.area_ft2) : '—'} <span style="font-size:12px;font-weight:500;color:var(--text-soft)">sqft</span></div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Home Size</div><div class="cr-kv-value">${ps.sqft ? fmtN(ps.sqft) + ' sqft' : '—'}</div><div class="cr-kv-sub">${ps.beds ? ps.beds + ' bed' : ''}${ps.full_baths ? ' · ' + ps.full_baths + ' bath' : ''}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Year Built</div><div class="cr-kv-value">${eh(String(ps.year_built || '—'))}</div><div class="cr-kv-sub">${eh(ps.style || '')}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Stories</div><div class="cr-kv-value">${eh(String(ps.stories || '—'))}</div><div class="cr-kv-sub">${ps.garage ? 'Garage: ' + eh(String(ps.garage)) : ''}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">ZIP Code</div><div class="cr-kv-value">${eh(zc.zip_code || d.zip_code || '—')}</div></div>
+  </div>
+</div>
+
+<!-- 4. Zoning & Development Standards -->
+<div class="cr-section">
+  <div class="cr-section-title">Zoning &amp; Development Standards</div>
+  <div class="cr-grid">
+    <div class="cr-kv"><div class="cr-kv-label">Zoning Code</div><div class="cr-kv-value">${eh(zon.zoning || '—')}</div><div class="cr-kv-sub">${eh(zon.zoning_full_name || '')}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">General Plan</div><div class="cr-kv-value" style="font-size:13px">${eh(gp.gp_designation || '—')}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Max ADU Size</div><div class="cr-kv-value">${cons.max_adu_size_sf ? fmtN(cons.max_adu_size_sf) + ' sqft' : '—'}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Max Height</div><div class="cr-kv-value">${cons.max_height_ft ? cons.max_height_ft + ' ft' : '—'}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Side Setback</div><div class="cr-kv-value">${cons.min_side_setback_ft != null ? cons.min_side_setback_ft + ' ft' : '—'}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Rear Setback</div><div class="cr-kv-value">${cons.min_rear_setback_ft != null ? cons.min_rear_setback_ft + ' ft' : '—'}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Front Setback</div><div class="cr-kv-value">${cons.front_setback_ft != null ? cons.front_setback_ft + ' ft' : '—'}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Standards / ADU Stories</div><div class="cr-kv-value" style="font-size:13px">${eh(sm.standards || standardsVal || '—')} · ${sm.adu_stories || currentFloors} stor${(sm.adu_stories || currentFloors) === 1 ? 'y' : 'ies'}</div></div>
+  </div>
+</div>
+
+<!-- 5. Site Flags -->
+<div class="cr-section">
+  <div class="cr-section-title">Site Flags</div>
+  <div class="cr-flags">
+    ${flag('Flood Zone',  '🌊', des.flood)}
+    ${flag('Geohazard',   '⛰',  des.geohazard)}
+    ${flag('Historic',    '🏛',  des.historic)}
+    ${flag('WUI',         '🔥', des.wui)}
+    ${flag('Heritage Trees','🌳',des.heritage_trees)}
+    ${ceFlag}
+  </div>
+</div>
+
+<!-- 6. Site Plan Diagram -->
+<div class="cr-section">
+  <div class="cr-section-title">Site Plan</div>
+  <div class="cr-site-diagram">${_buildSiteDiagramSvg()}</div>
+  <div class="cr-setback-table" style="margin-top:14px;">
+    <table class="cr-table" style="font-size:12px;">
+      <thead><tr><th>Setback</th><th>Requirement</th><th>Source</th></tr></thead>
+      <tbody>
+        <tr><td>Front</td><td>${cons.front_setback_ft != null ? cons.front_setback_ft + ' ft' : '—'}</td><td>${eh(sm.standards || standardsVal || '—')} standards</td></tr>
+        <tr><td>Side</td><td>${cons.min_side_setback_ft != null ? cons.min_side_setback_ft + ' ft' : '—'}</td><td>${eh(sm.standards || standardsVal || '—')} standards</td></tr>
+        <tr><td>Rear</td><td>${cons.min_rear_setback_ft != null ? cons.min_rear_setback_ft + ' ft' : '—'}</td><td>${eh(sm.standards || standardsVal || '—')} standards</td></tr>
+        ${cons.max_rear_yard_coverage_pct != null ? `<tr><td>Rear yard coverage</td><td>≤ ${cons.max_rear_yard_coverage_pct}%</td><td>City standards</td></tr>` : ''}
+        ${cons.min_building_separation_ft != null ? `<tr><td>Bldg separation</td><td>${cons.min_building_separation_ft} ft</td><td>City standards</td></tr>` : ''}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+${_build3dViewsHtml()}
+
+<!-- 7. Compliance Checklist -->
+<div class="cr-section">
+  <div class="cr-section-title">Compliance Checklist <span style="font-weight:400;color:var(--text-faint)">(${items.length} items)</span></div>
+  ${checklistHtml || '<p style="color:var(--text-faint);font-size:13px">No checklist items available.</p>'}
+</div>
+
+<!-- 8. Permit History -->
+<div class="cr-section">
+  <div class="cr-section-title">Permit History <span style="font-weight:400;color:var(--text-faint)">${perms.active_count || 0} active · ${perms.finalized_count || 0} finalized</span></div>
+  <table class="cr-table">
+    <thead><tr><th>Date</th><th>Permit #</th><th>Description</th><th>Status</th></tr></thead>
+    <tbody>${permitRows || '<tr><td colspan="4" style="color:var(--text-faint);font-size:13px;padding:14px 12px">No permit records found.</td></tr>'}</tbody>
+  </table>
+</div>
+
+<!-- 9. Financial Projection -->
+<div class="cr-section">
+  <div class="cr-section-title">Financial Projection</div>
+  <div class="cr-fin-grid">
+    <div>
+      <div class="cr-fin-col-title">Build Cost</div>
+      <div class="cr-fin-row"><span>ADU size (configured)</span><strong>${fmtN(Math.round(aduSqft))} sqft</strong></div>
+      <div class="cr-fin-row"><span>Cost/sqft (${eh(aduTypeVal || 'detached')})</span><strong>$${cpsq}</strong></div>
+      <div class="cr-fin-row"><span>Hard cost (80%)</span><strong>${fmt(hardCost)}</strong></div>
+      <div class="cr-fin-row"><span>Soft cost (20%)</span><strong>${fmt(softCost)}</strong></div>
+      <div class="cr-fin-row cr-fin-highlight"><span>Total build cost</span><strong>${fmt(totalCost)}</strong></div>
+      ${fin.down_payment != null ? `<div class="cr-fin-row"><span>Down payment</span><strong>${fmt(fin.down_payment)}</strong></div>` : ''}
+      ${fin.loan_amount != null ? `<div class="cr-fin-row"><span>Loan amount</span><strong>${fmt(fin.loan_amount)}</strong></div>` : ''}
+      ${fin.interest_rate_pct != null ? `<div class="cr-fin-row"><span>Interest rate</span><strong>${fmtPctR(fin.interest_rate_pct)}</strong></div>` : ''}
+      ${fin.monthly_payment != null ? `<div class="cr-fin-row"><span>Monthly P&amp;I</span><strong>${fmt(fin.monthly_payment)}</strong></div>` : ''}
+    </div>
+    <div>
+      <div class="cr-fin-col-title">Returns</div>
+      <div class="cr-fin-row cr-fin-highlight"><span>Monthly rent (est.)</span><strong>${monthlyRent ? fmt(monthlyRent) : '—'}</strong></div>
+      ${monthlyRent ? `<div class="cr-fin-row"><span>Annual rent</span><strong>${fmt(monthlyRent * 12)}</strong></div>` : ''}
+      ${fin.cap_rate_pct != null ? `<div class="cr-fin-row"><span>Cap rate</span><strong>${fmtPctR(fin.cap_rate_pct)}</strong></div>` : ''}
+      ${fin.cash_on_cash_pct != null ? `<div class="cr-fin-row"><span>Cash-on-cash</span><strong>${fmtPctR(fin.cash_on_cash_pct)}</strong></div>` : ''}
+      ${fin.dscr != null ? `<div class="cr-fin-row"><span>DSCR</span><strong>${(+fin.dscr).toFixed(2)}</strong></div>` : ''}
+      ${fin.payback_years != null ? `<div class="cr-fin-row"><span>Payback period</span><strong>${fmtYr(fin.payback_years)}</strong></div>` : ''}
+      ${fin.noi != null ? `<div class="cr-fin-row"><span>Annual NOI</span><strong>${fmt(fin.noi)}</strong></div>` : ''}
+    </div>
+  </div>
+</div>
+
+<!-- 10. Rental Market -->
+<div class="cr-section">
+  <div class="cr-section-title">Rental Market — ZIP ${eh(zc.zip_code || '—')}</div>
+  <div class="cr-grid" style="margin-bottom:16px">
+    <div class="cr-kv"><div class="cr-kv-label">Median Rent (ZIP)</div><div class="cr-kv-value">${zc.median_rent ? fmt(zc.median_rent) : '—'}</div></div>
+    <div class="cr-kv"><div class="cr-kv-label">Avg Rent (ZIP)</div><div class="cr-kv-value">${zc.average_rent || zc.avg_rent ? fmt(zc.average_rent || zc.avg_rent) : '—'}</div></div>
+  </div>
+  ${rentRows ? `<table class="cr-table">
+    <thead><tr><th>Bedrooms</th><th>Avg Rent</th><th>Median Rent</th><th>Samples</th></tr></thead>
+    <tbody>${rentRows}</tbody>
+  </table>` : '<p style="color:var(--text-faint);font-size:13px">No rental breakdown available.</p>'}
+</div>
+
+<!-- 11. Footer -->
+<div class="cr-footer">
+  <p><strong>Disclaimer:</strong> This Casita Report is generated from public GIS data, permit records, and third-party rental databases for informational purposes only. It does not constitute legal, financial, or engineering advice. All figures are estimates and should be verified with licensed professionals before making investment decisions.</p>
+  <p><strong>Data sources:</strong> City of San Jose ArcGIS layers, Santa Clara County Assessor, San Jose Permit &amp; Code Enforcement records, HomeHarvest/Realtor.com rental comps.</p>
+  ${warns.length ? `<p><strong>Data warnings:</strong> The following GIS services were unavailable: ${warns.map(w => eh((w.field || '').replace(/_/g, ' '))).join(', ')}.</p>` : ''}
+  <p style="margin-top:8px">Generated by Casita · ${dateStr} · Job ${eh(jobId)}</p>
+</div>`;
+    }

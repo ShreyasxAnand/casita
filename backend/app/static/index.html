@@ -715,7 +715,40 @@
         <div id="financingPanel">
           <div id="rentCards" class="metrics financing-metrics"></div>
           <p id="financingNote" class="help-text" style="margin-top:14px;">Load a site to fetch rent comps for this zip.</p>
+          <div id="generateReportCta" style="margin-top:24px;" hidden>
+            <button type="button" class="cr-gen-btn" id="generateReportBtn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+              Generate Casita Report
+            </button>
+          </div>
         </div>
+      </div>
+    </div>
+
+    <!-- ── Casita Report overlay ─────────────────────────────────────────── -->
+    <div id="casitaReportOverlay" class="cr-overlay" hidden aria-modal="true" role="dialog" aria-labelledby="crReportTitle">
+      <div class="cr-chrome">
+        <div class="cr-chrome-bar">
+          <span class="cr-chrome-brand">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+            Casita Report
+          </span>
+          <div class="cr-chrome-actions">
+            <button type="button" class="cr-print-btn" id="crPrintBtn">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+              Print / Save PDF
+            </button>
+            <button type="button" class="cr-close-btn" id="crCloseBtn" aria-label="Close report">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="cr-scroll-area">
+        <article class="casita-report" id="casitaReportArticle">
+          <!-- populated by openCasitaReport() -->
+        </article>
       </div>
     </div>
 

@@ -237,6 +237,7 @@ def build_property_stats(
         "neighborhood_name": neighborhood_name,
         "neighborhood_avg_year_built": neighborhood_avg_year_built,
         "significantly_newer_than_neighborhood": significantly_newer,
+        "estimated_value": _coerce_float(prop_data.get("estimated_value")),
         "note": "Real listing data from HomeHarvest (Realtor.com).",
     }
 
@@ -501,5 +502,97 @@ def build_financing(
             "cap_rate_pct": round(cap_rate_pct, 2) if cap_rate_pct is not None else None,
             "dscr": round(dscr, 2) if dscr is not None else None,
             "payback_years": round(payback_years, 1) if payback_years is not None else None,
+        },
+    }
+
+
+def compute_financial_score(
+    adu_sqft: float,
+    adu_type: str,
+    zip_context: dict[str, Any],
+    estimated_value: float | None,
+) -> dict[str, Any]:
+    """Score the financial attractiveness of the ADU investment (0–100).
+
+    Weights: gross yield 30 pts, breakeven 25 pts, investment ratio 20 pts,
+    local rental demand 25 pts.
+    """
+    cost_per_sqft = 380.0 if adu_type == "detached" else 290.0
+    build_cost = adu_sqft * cost_per_sqft
+
+    rent_psf = zip_context.get("rent_per_sqft")
+    rental_listings = int(zip_context.get("rental_listings") or 0)
+
+    if rent_psf and rent_psf > 0:
+        monthly_rent = round(rent_psf * adu_sqft)
+        rent_source = "rent_per_sqft"
+    else:
+        rent_est = estimate_adu_rent(adu_sqft, zip_context)
+        monthly_rent = round(rent_est.get("monthly_rent") or 0)
+        rent_source = rent_est.get("method", "no_data")
+
+    annual_rent = monthly_rent * 12
+    gross_yield_pct = (annual_rent / build_cost * 100) if build_cost > 0 else None
+    breakeven_years = (build_cost / annual_rent) if annual_rent > 0 else None
+    investment_ratio_pct = (
+        (build_cost / estimated_value * 100)
+        if estimated_value and estimated_value > 0 else None
+    )
+    value_uplift = build_cost * 1.3
+    new_estimated_value = (estimated_value + value_uplift) if estimated_value else None
+    heloc_equity = (estimated_value * 0.60) if estimated_value else None
+    heloc_viable = bool(heloc_equity and heloc_equity >= build_cost)
+
+    # Gross yield: 30 pts linear 0→8% (capped at 30)
+    gy_pts = min(30.0, (gross_yield_pct or 0.0) / 8.0 * 30.0)
+
+    # Breakeven: 25 pts at ≤10 yr, linear down to 0 at ≥20 yr
+    if breakeven_years is None:
+        be_pts = 0.0
+    elif breakeven_years <= 10:
+        be_pts = 25.0
+    elif breakeven_years < 20:
+        be_pts = max(0.0, 25.0 * (20 - breakeven_years) / 10)
+    else:
+        be_pts = 0.0
+
+    # Investment ratio: 20 pts at ≤15%, linear down to 0 at ≥40%; neutral 10 if unknown
+    if investment_ratio_pct is None:
+        ir_pts = 10.0
+    elif investment_ratio_pct <= 15:
+        ir_pts = 20.0
+    elif investment_ratio_pct < 40:
+        ir_pts = max(0.0, 20.0 * (40 - investment_ratio_pct) / 25)
+    else:
+        ir_pts = 0.0
+
+    # Rental demand: 25 pts linear, capped at 10 listings
+    rd_pts = min(25.0, rental_listings / 10.0 * 25.0)
+
+    financial_score = min(100.0, round(gy_pts + be_pts + ir_pts + rd_pts, 1))
+
+    return {
+        "adu_sqft": round(adu_sqft, 1),
+        "adu_type": adu_type,
+        "cost_per_sqft": cost_per_sqft,
+        "build_cost": round(build_cost),
+        "monthly_rent": monthly_rent,
+        "annual_rent": annual_rent,
+        "gross_yield_pct": round(gross_yield_pct, 2) if gross_yield_pct is not None else None,
+        "breakeven_years": round(breakeven_years, 1) if breakeven_years is not None else None,
+        "investment_ratio_pct": round(investment_ratio_pct, 1) if investment_ratio_pct is not None else None,
+        "estimated_value": round(estimated_value) if estimated_value else None,
+        "value_uplift": round(value_uplift),
+        "new_estimated_value": round(new_estimated_value) if new_estimated_value else None,
+        "heloc_viable": heloc_viable,
+        "heloc_equity_available": round(heloc_equity) if heloc_equity else None,
+        "rental_listings": rental_listings,
+        "rent_source": rent_source,
+        "financial_score": financial_score,
+        "score_breakdown": {
+            "gross_yield_pts": round(gy_pts, 1),
+            "breakeven_pts": round(be_pts, 1),
+            "investment_ratio_pts": round(ir_pts, 1),
+            "rental_demand_pts": round(rd_pts, 1),
         },
     }
