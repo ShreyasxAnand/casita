@@ -4425,7 +4425,25 @@
 
     document.getElementById('generateReportBtn')?.addEventListener('click', openCasitaReport);
     document.getElementById('crCloseBtn')?.addEventListener('click', closeCasitaReport);
-    document.getElementById('crPrintBtn')?.addEventListener('click', () => window.print());
+    document.getElementById('crPrintBtn')?.addEventListener('click', () => {
+      const article = document.getElementById('casitaReportArticle');
+      const address = _lastSiteData?.address || 'casita-report';
+      const filename = address.replace(/[^a-z0-9]/gi, '-').replace(/-+/g, '-').toLowerCase() + '.pdf';
+      const btn = document.getElementById('crPrintBtn');
+      btn.disabled = true;
+      btn.textContent = 'Generating…';
+      html2pdf().set({
+        margin: [10, 12, 10, 12],
+        filename,
+        image: { type: 'jpeg', quality: 0.92 },
+        html2canvas: { scale: 2, useCORS: true, logging: false },
+        jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
+        pagebreak: { mode: ['avoid-all', 'css'] },
+      }).from(article).save().finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PDF';
+      });
+    });
 
     // Front edge picker skip
     document.getElementById('frontEdgeSkipBtn')?.addEventListener('click', () => {
@@ -5146,9 +5164,13 @@
 
       // Flags
       function flag(label, icon, desObj) {
-        const present = desObj?.present;
+        // "absent" means the service confirmed nothing was found → definitively Clear.
+        // "failed" means the service errored → Unknown.
+        // "ok" uses the actual present field from DesignationData.
+        const st = desObj?.status;
+        const present = st === 'absent' ? false : st === 'ok' ? desObj.present : desObj?.present ?? null;
         const cls = present == null ? 'unknown' : present ? 'flagged' : 'clear';
-        const txt = present == null ? 'Unknown' : present ? 'Present' : 'Clear';
+        const txt = present == null ? 'Unknown' : present ? 'Present' : 'None found';
         return `<div class="cr-flag ${cls}">
           <div class="cr-flag-icon">${icon}</div>
           <div class="cr-flag-label">${label}</div>

@@ -252,17 +252,16 @@ class SanJoseAdapter:
             d["finalized_count"] = result.data.finalized_count
             d["total_count"] = len(result.data.records)
             d["has_pool_permit"] = result.data.has_pool_permit
-            d["pool_permits"] = [
-                {
-                    "folder_num": p.folder_num,
-                    "work_desc": p.work_desc,
-                    "sub_desc": p.sub_desc,
-                    "status": p.status,
-                    "issue_date": p.issue_date,
-                    "final_date": p.final_date,
-                }
-                for p in result.data.pool_permits
-            ]
+            _serialize_permit = lambda p: {
+                "folder_num": p.folder_num,
+                "work_desc": p.work_desc,
+                "sub_desc": p.sub_desc,
+                "status": p.status,
+                "issue_date": p.issue_date,
+                "final_date": p.final_date,
+            }
+            d["records"] = [_serialize_permit(p) for p in result.data.records]
+            d["pool_permits"] = [_serialize_permit(p) for p in result.data.pool_permits]
         return d
 
     def serialize_code_enforcement(
@@ -275,6 +274,7 @@ class SanJoseAdapter:
             d["complaint_count"] = result.data.complaint_count
             d["investigation_count"] = result.data.investigation_count
             d["total_count"] = result.data.total_count
+            d["has_issues"] = result.data.has_issues
             d["issues"] = [
                 {
                     "issue_type": i.issue_type,
